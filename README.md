@@ -2,7 +2,11 @@
 
 基于 OpenAI `gpt-image-2` 接口的图片生成与编辑工具。提供简洁的 Web UI，支持文本生成图片、参考图编辑、可视化参数调节、历史记录管理与本地数据导入导出。
 
-**Vercel 部署版本在线体验：** [https://gpt-image-playground.cooksleep.dev](https://gpt-image-playground.cooksleep.dev)
+**Vercel 部署版本在线体验：** 
+https://gpt-image-playground.cooksleep.dev
+
+**GitHub Pages 部署版本在线体验：**
+https://cooksleep.github.io/gpt_image_playground
 
 ---
 
@@ -204,6 +208,10 @@ docker compose up -d
 
 例如：
 - 接入 New API 聊天应用：
+  ```
+  https://gpt-image-playground.cooksleep.dev?apiUrl={address}&apiKey={key}
+  ```
+
   ```
   https://cooksleep.github.io/gpt_image_playground?apiUrl={address}&apiKey={key}
   ```
