@@ -3,7 +3,7 @@
 基于 OpenAI `gpt-image-2` 接口的图片生成与编辑工具。提供简洁的 Web UI，支持文本生成图片、参考图编辑、可视化参数调节、历史记录管理与本地数据导入导出。
 
 
-> 如有调用本地 API 的需求，请使用 GitHub Pages 版本或自行部署，因为 `.dev` 域名要求页面本身及其加载的资源（的来源）均为 HTTPS。
+> 如有调用非本地的 HTTP API 的需求，请使用 GitHub Pages 版本或自行部署，因为 `.dev` 域名要求页面本身及其加载的资源（的来源）均为 HTTPS。
 
 **Vercel 部署版本在线体验：** 
 https://gpt-image-playground.cooksleep.dev
