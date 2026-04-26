@@ -183,12 +183,91 @@ function createApiError(message: string, status?: number): ApiError {
   return error
 }
 
+function tryParseJson(text: string): unknown | undefined {
+  const trimmed = text.trim()
+  if (!trimmed) return undefined
+
+  try {
+    return JSON.parse(trimmed)
+  } catch {
+    return undefined
+  }
+}
+
+interface ParsedSseEvent {
+  event: string
+  dataText: string
+  json?: unknown
+}
+
+function parseSseEvents(text: string): ParsedSseEvent[] {
+  const events: ParsedSseEvent[] = []
+  const lines = text.split(/\r?\n/)
+  let currentEvent = ''
+  let dataLines: string[] = []
+
+  const flush = () => {
+    if (!currentEvent && dataLines.length === 0) return
+
+    const dataText = dataLines.join('\n')
+    events.push({
+      event: currentEvent,
+      dataText,
+      json: tryParseJson(dataText),
+    })
+
+    currentEvent = ''
+    dataLines = []
+  }
+
+  for (const line of lines) {
+    if (!line) {
+      flush()
+      continue
+    }
+
+    if (line.startsWith('event:')) {
+      currentEvent = line.slice('event:'.length).trim()
+      continue
+    }
+
+    if (line.startsWith('data:')) {
+      dataLines.push(line.slice('data:'.length).trimStart())
+    }
+  }
+
+  flush()
+  return events
+}
+
 function extractErrorMessage(payload: unknown): string | null {
   if (!isRecord(payload)) return null
 
   const directMessage = payload.message
   if (typeof directMessage === 'string' && directMessage.trim()) {
     return directMessage
+  }
+
+  const directDetail = payload.detail
+  if (typeof directDetail === 'string' && directDetail.trim()) {
+    return directDetail
+  }
+  if (Array.isArray(directDetail)) {
+    const detailText = directDetail
+      .map((item) => {
+        if (typeof item === 'string') return item.trim()
+        if (isRecord(item)) {
+          const nestedDetail = item.msg
+          if (typeof nestedDetail === 'string') return nestedDetail.trim()
+        }
+        return ''
+      })
+      .filter(Boolean)
+      .join('；')
+
+    if (detailText) {
+      return detailText
+    }
   }
 
   const error = payload.error
@@ -289,6 +368,17 @@ async function parseImagesFromPayload(
     }
   }
 
+  const item = payload.item
+  if (isRecord(item)) {
+    await appendImageFromItem(images, item, fallbackMime, signal)
+  }
+
+  const response = payload.response
+  if (isRecord(response)) {
+    const nestedImages = await parseImagesFromPayload(response, fallbackMime, signal)
+    images.push(...nestedImages)
+  }
+
   return images
 }
 
@@ -326,7 +416,15 @@ type ResponsesInputContent =
     }
   | ResponsesInputImage
 
-type ResponsesBodyMode = 'edit-with-tool-choice' | 'edit-basic' | 'generate-with-tool-choice' | 'generate-basic'
+type ResponsesInputPayloadMode = 'compact-string' | 'message-list'
+
+type ResponsesBodyMode =
+  | 'edit-with-tool-choice'
+  | 'edit-basic'
+  | 'generate-with-tool-choice'
+  | 'generate-basic'
+  | 'generate-list-with-tool-choice'
+  | 'generate-list-basic'
 
 function getApiProtocol(settings: AppSettings): ApiProtocol {
   return settings.apiProtocol || 'auto'
@@ -348,7 +446,73 @@ function shouldRetryResponsesWithCompatibility(error: unknown): boolean {
     return true
   }
 
-  return /(?:HTTP 5\d{2}|tool|image_generation|response|internal|server error)/i.test(error.message)
+  return /(?:HTTP 5\d{2}|tool(?:_choice)?|image_generation|response|internal|server error|input must be a list|input.*array|expected.*list|expected.*array)/i.test(
+    error.message,
+  )
+}
+
+async function readResponsesPayload(response: Response): Promise<unknown> {
+  const text = await response.text()
+  const directJson = tryParseJson(text)
+  if (directJson !== undefined) {
+    return directJson
+  }
+
+  const sseEvents = parseSseEvents(text)
+  if (!sseEvents.length) {
+    throw createApiError('Responses API 返回了非 JSON 响应，且不是可解析的 SSE 数据', response.status)
+  }
+
+  const jsonPayloads = sseEvents
+    .map((event) => event.json)
+    .filter((payload): payload is Record<string, unknown> => isRecord(payload))
+  const outputItems = jsonPayloads
+    .filter((payload) => payload.type === 'response.output_item.done' && isRecord(payload.item))
+    .map((payload) => payload.item as Record<string, unknown>)
+
+  const failedPayload = [...jsonPayloads].reverse().find((payload) => {
+    if (payload.type === 'response.failed') return true
+    const nestedResponse = payload.response
+    return isRecord(nestedResponse) && nestedResponse.status === 'failed'
+  })
+
+  if (failedPayload) {
+    const nestedResponse = isRecord(failedPayload.response) ? failedPayload.response : null
+    const message =
+      extractErrorMessage(failedPayload) ||
+      (nestedResponse ? extractErrorMessage(nestedResponse) : null) ||
+      'Responses API 处理失败'
+    throw createApiError(message, response.status)
+  }
+
+  const completedPayload = [...jsonPayloads].reverse().find(
+    (payload) => payload.type === 'response.completed' && isRecord(payload.response),
+  )
+  if (completedPayload && isRecord(completedPayload.response)) {
+    const completedResponse = completedPayload.response as Record<string, unknown>
+    const existingOutput = Array.isArray(completedResponse.output) ? completedResponse.output : []
+    if (existingOutput.length > 0 || outputItems.length === 0) {
+      return completedResponse
+    }
+
+    return {
+      ...completedResponse,
+      output: outputItems,
+    }
+  }
+
+  if (outputItems.length > 0) {
+    return {
+      output: outputItems,
+    }
+  }
+
+  const lastJsonPayload = [...jsonPayloads].reverse().find(Boolean)
+  if (lastJsonPayload) {
+    return lastJsonPayload
+  }
+
+  throw createApiError('Responses API 返回了 SSE，但未包含可解析的 JSON 事件', response.status)
 }
 
 async function callImagesApi(
@@ -544,8 +708,12 @@ function buildResponsesInput(prompt: string, inputImages: ResponsesInputImage[])
   ]
 }
 
-function buildResponsesInputPayload(prompt: string, inputImages: ResponsesInputImage[]) {
-  if (!inputImages.length && prompt.trim()) {
+function buildResponsesInputPayload(
+  prompt: string,
+  inputImages: ResponsesInputImage[],
+  mode: ResponsesInputPayloadMode,
+) {
+  if (mode === 'compact-string' && !inputImages.length && prompt.trim()) {
     return prompt.trim()
   }
 
@@ -559,6 +727,10 @@ function buildResponsesBody(
 ): Record<string, unknown> {
   const { settings, prompt, params } = opts
   const hasReferenceImages = inputImages.length > 0
+  const inputPayloadMode: ResponsesInputPayloadMode =
+    hasReferenceImages || mode === 'generate-list-with-tool-choice' || mode === 'generate-list-basic'
+      ? 'message-list'
+      : 'compact-string'
   const tool: Record<string, unknown> = {
     type: 'image_generation',
     model: getResponsesImageModel(settings),
@@ -583,11 +755,15 @@ function buildResponsesBody(
 
   const body: Record<string, unknown> = {
     model: settings.model,
-    input: buildResponsesInputPayload(prompt, inputImages),
+    input: buildResponsesInputPayload(prompt, inputImages, inputPayloadMode),
     tools: [tool],
   }
 
-  if (mode === 'edit-with-tool-choice' || mode === 'generate-with-tool-choice') {
+  if (
+    mode === 'edit-with-tool-choice' ||
+    mode === 'generate-with-tool-choice' ||
+    mode === 'generate-list-with-tool-choice'
+  ) {
     body.tool_choice = { type: 'image_generation' }
   }
 
@@ -601,7 +777,12 @@ function buildResponsesBodies(
   const modes: ResponsesBodyMode[] =
     inputImages.length > 0
       ? ['edit-with-tool-choice', 'edit-basic']
-      : ['generate-with-tool-choice', 'generate-basic']
+      : [
+          'generate-with-tool-choice',
+          'generate-basic',
+          'generate-list-with-tool-choice',
+          'generate-list-basic',
+        ]
 
   return modes.map((mode) => buildResponsesBody(opts, inputImages, mode))
 }
@@ -640,7 +821,7 @@ async function callResponsesApi(
             throw await buildApiErrorFromResponse(response)
           }
 
-          const payload = await response.json()
+          const payload = await readResponsesPayload(response)
           const parsedImages = await parseImagesFromPayload(payload, ctx.mime, ctx.controller.signal)
           if (!parsedImages.length) {
             throw createApiError('Responses API 未返回可用图片数据')
