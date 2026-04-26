@@ -2,12 +2,19 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type {
   AppSettings,
+  ProviderConfig,
   TaskParams,
   InputImage,
   TaskRecord,
   ExportData,
+  TaskView,
 } from './types'
-import { DEFAULT_SETTINGS, DEFAULT_PARAMS } from './types'
+import {
+  DEFAULT_SETTINGS,
+  DEFAULT_PARAMS,
+  UNKNOWN_TASK_PROVIDER_NAME,
+  isTaskInRecycleBin,
+} from './types'
 import {
   getAllTasks,
   putTask,
@@ -29,6 +36,10 @@ import { zipSync, unzipSync, strToU8, strFromU8 } from 'fflate'
 // 内存缓存，id → dataUrl，避免每次从 IndexedDB 读取
 
 const imageCache = new Map<string, string>()
+const imageLoadPromiseCache = new Map<string, Promise<string | undefined>>()
+const RECYCLE_BIN_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+const RECYCLE_BIN_POLL_INTERVAL_MS = 10 * 60 * 1000
+let recycleBinJanitorId: number | null = null
 
 export function getCachedImage(id: string): string | undefined {
   return imageCache.get(id)
@@ -36,12 +47,100 @@ export function getCachedImage(id: string): string | undefined {
 
 export async function ensureImageCached(id: string): Promise<string | undefined> {
   if (imageCache.has(id)) return imageCache.get(id)
-  const rec = await getImage(id)
-  if (rec) {
-    imageCache.set(id, rec.dataUrl)
-    return rec.dataUrl
+  const pending = imageLoadPromiseCache.get(id)
+  if (pending) return pending
+
+  const nextPromise = getImage(id)
+    .then((rec) => {
+      if (rec) {
+        imageCache.set(id, rec.dataUrl)
+        return rec.dataUrl
+      }
+      return undefined
+    })
+    .finally(() => {
+      imageLoadPromiseCache.delete(id)
+    })
+
+  imageLoadPromiseCache.set(id, nextPromise)
+  return nextPromise
+}
+
+function isRemoteImageUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value)
+}
+
+const DEFAULT_PROVIDER_NAME = '供应商 1'
+
+function genProviderId(): string {
+  return `provider-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+function getProviderSettings(provider: ProviderConfig): AppSettings {
+  const { id, name, ...settings } = provider
+  return settings
+}
+
+function findProviderById(
+  providers: ProviderConfig[],
+  providerId: string | null | undefined,
+): ProviderConfig | undefined {
+  if (!providerId) return undefined
+  return providers.find((provider) => provider.id === providerId)
+}
+
+function createProviderConfig(
+  settings: Partial<AppSettings>,
+  name: string,
+  id = genProviderId(),
+): ProviderConfig {
+  return {
+    ...DEFAULT_SETTINGS,
+    ...settings,
+    id,
+    name: name.trim() || '未命名供应商',
   }
-  return undefined
+}
+
+function getNextProviderName(providers: ProviderConfig[]): string {
+  let index = providers.length + 1
+  while (providers.some((provider) => provider.name === `供应商 ${index}`)) {
+    index += 1
+  }
+  return `供应商 ${index}`
+}
+
+function createInitialProviderState(settings: Partial<AppSettings> = DEFAULT_SETTINGS) {
+  const provider = createProviderConfig(settings, DEFAULT_PROVIDER_NAME)
+  return {
+    providers: [provider],
+    activeProviderId: provider.id,
+    settings: getProviderSettings(provider),
+  }
+}
+
+function normalizeProviderList(providers: unknown): ProviderConfig[] {
+  if (!Array.isArray(providers)) return []
+
+  return providers
+    .map((provider, index) => {
+      if (!provider || typeof provider !== 'object') return null
+      const record = provider as Partial<ProviderConfig>
+      return createProviderConfig(
+        {
+          baseUrl: record.baseUrl,
+          apiKey: record.apiKey,
+          model: record.model,
+          responsesImageModel: record.responsesImageModel,
+          timeout: record.timeout,
+          apiProtocol: record.apiProtocol,
+          requestMode: record.requestMode,
+        },
+        typeof record.name === 'string' ? record.name : `供应商 ${index + 1}`,
+        typeof record.id === 'string' && record.id ? record.id : undefined,
+      )
+    })
+    .filter((provider): provider is ProviderConfig => provider !== null)
 }
 
 // ===== Store 类型 =====
@@ -49,7 +148,14 @@ export async function ensureImageCached(id: string): Promise<string | undefined>
 interface AppState {
   // 设置
   settings: AppSettings
+  providers: ProviderConfig[]
+  activeProviderId: string
   setSettings: (s: Partial<AppSettings>) => void
+  setActiveProvider: (id: string) => void
+  createProvider: () => void
+  updateProviderName: (id: string, name: string) => void
+  removeProvider: (id: string) => void
+  replaceProviderState: (providers: ProviderConfig[], activeProviderId?: string) => void
 
   // 输入
   prompt: string
@@ -67,12 +173,18 @@ interface AppState {
   // 任务列表
   tasks: TaskRecord[]
   setTasks: (t: TaskRecord[]) => void
+  selectedTaskIds: string[]
+  setSelectedTaskIds: (ids: string[]) => void
+  toggleTaskSelection: (id: string) => void
+  clearSelectedTasks: () => void
 
   // 搜索和筛选
   searchQuery: string
   setSearchQuery: (q: string) => void
   filterStatus: 'all' | 'running' | 'done' | 'error'
   setFilterStatus: (status: AppState['filterStatus']) => void
+  taskView: TaskView
+  setTaskView: (view: TaskView) => void
 
   // UI
   detailTaskId: string | null
@@ -91,6 +203,7 @@ interface AppState {
   confirmDialog: {
     title: string
     message: string
+    confirmText?: string
     action: () => void
   } | null
   setConfirmDialog: (d: AppState['confirmDialog']) => void
@@ -100,8 +213,78 @@ export const useStore = create<AppState>()(
   persist(
     (set, get) => ({
       // Settings
-      settings: { ...DEFAULT_SETTINGS },
-      setSettings: (s) => set((st) => ({ settings: { ...st.settings, ...s } })),
+      ...createInitialProviderState(),
+      setSettings: (s) =>
+        set((st) => {
+          const settings = { ...st.settings, ...s }
+          const providers = st.providers.map((provider) =>
+            provider.id === st.activeProviderId ? { ...provider, ...s } : provider,
+          )
+          return { settings, providers }
+        }),
+      setActiveProvider: (id) =>
+        set((st) => {
+          const provider = st.providers.find((item) => item.id === id)
+          if (!provider) return st
+          return {
+            activeProviderId: provider.id,
+            settings: getProviderSettings(provider),
+          }
+        }),
+      createProvider: () =>
+        set((st) => {
+          const provider = createProviderConfig(st.settings, getNextProviderName(st.providers))
+          return {
+            providers: [...st.providers, provider],
+            activeProviderId: provider.id,
+            settings: getProviderSettings(provider),
+          }
+        }),
+      updateProviderName: (id, name) =>
+        set((st) => ({
+          providers: st.providers.map((provider) =>
+            provider.id === id ? { ...provider, name: name.trim() || provider.name } : provider,
+          ),
+        })),
+      removeProvider: (id) =>
+        set((st) => {
+          if (st.providers.length <= 1) return st
+
+          const providers = st.providers.filter((provider) => provider.id !== id)
+          if (providers.length === st.providers.length) return st
+
+          const activeProvider =
+            providers.find((provider) => provider.id === st.activeProviderId) ?? providers[0]
+
+          return {
+            providers,
+            activeProviderId: activeProvider.id,
+            settings: getProviderSettings(activeProvider),
+          }
+        }),
+      replaceProviderState: (providers, activeProviderId) =>
+        set(() => {
+          const normalizedProviders = normalizeProviderList(providers)
+          const nextState =
+            normalizedProviders.length > 0
+              ? {
+                  providers: normalizedProviders,
+                  activeProviderId:
+                    normalizedProviders.find((provider) => provider.id === activeProviderId)?.id ??
+                    normalizedProviders[0].id,
+                }
+              : createInitialProviderState()
+
+          const activeProvider = nextState.providers.find(
+            (provider) => provider.id === nextState.activeProviderId,
+          ) ?? nextState.providers[0]
+
+          return {
+            providers: nextState.providers,
+            activeProviderId: activeProvider.id,
+            settings: getProviderSettings(activeProvider),
+          }
+        }),
 
       // Input
       prompt: '',
@@ -129,13 +312,46 @@ export const useStore = create<AppState>()(
 
       // Tasks
       tasks: [],
-      setTasks: (tasks) => set({ tasks }),
+      setTasks: (tasks) =>
+        set((state) => {
+          const taskIds = new Set(tasks.map((task) => task.id))
+          return {
+            tasks,
+            selectedTaskIds: state.selectedTaskIds.filter((id) => taskIds.has(id)),
+            detailTaskId:
+              state.detailTaskId && taskIds.has(state.detailTaskId) ? state.detailTaskId : null,
+          }
+        }),
+      selectedTaskIds: [],
+      setSelectedTaskIds: (ids) =>
+        set((state) => {
+          const taskIds = new Set(state.tasks.map((task) => task.id))
+          return {
+            selectedTaskIds: Array.from(new Set(ids)).filter((id) => taskIds.has(id)),
+          }
+        }),
+      toggleTaskSelection: (id) =>
+        set((state) => {
+          if (!state.tasks.some((task) => task.id === id)) return state
+          const selectedTaskIds = state.selectedTaskIds.includes(id)
+            ? state.selectedTaskIds.filter((taskId) => taskId !== id)
+            : [...state.selectedTaskIds, id]
+          return { selectedTaskIds }
+        }),
+      clearSelectedTasks: () => set({ selectedTaskIds: [] }),
 
       // Search & Filter
       searchQuery: '',
       setSearchQuery: (searchQuery) => set({ searchQuery }),
       filterStatus: 'all',
       setFilterStatus: (filterStatus) => set({ filterStatus }),
+      taskView: 'gallery',
+      setTaskView: (taskView) =>
+        set({
+          taskView,
+          selectedTaskIds: [],
+          detailTaskId: null,
+        }),
 
       // UI
       detailTaskId: null,
@@ -164,8 +380,43 @@ export const useStore = create<AppState>()(
       name: 'gpt-image-playground',
       partialize: (state) => ({
         settings: state.settings,
+        providers: state.providers,
+        activeProviderId: state.activeProviderId,
         params: state.params,
       }),
+      merge: (persistedState, currentState) => {
+        const persisted = persistedState as Partial<AppState> | undefined
+        const normalizedProviders = normalizeProviderList(persisted?.providers)
+        const providerState =
+          normalizedProviders.length > 0
+            ? (() => {
+                const activeProvider =
+                  normalizedProviders.find((provider) => provider.id === persisted?.activeProviderId) ??
+                  normalizedProviders[0]
+
+                return {
+                  providers: normalizedProviders,
+                  activeProviderId: activeProvider.id,
+                  settings: getProviderSettings(activeProvider),
+                }
+              })()
+            : createInitialProviderState({
+                ...currentState.settings,
+                ...persisted?.settings,
+              })
+
+        return {
+          ...currentState,
+          ...persisted,
+          settings: providerState.settings,
+          providers: providerState.providers,
+          activeProviderId: providerState.activeProviderId,
+          params: {
+            ...currentState.params,
+            ...persisted?.params,
+          },
+        }
+      },
     },
   ),
 )
@@ -182,6 +433,13 @@ export async function initStore() {
   const tasks = await getAllTasks()
   useStore.getState().setTasks(tasks)
 
+  // 图片改为按需懒加载，避免启动时把整个图库都塞进内存，拖慢画廊首屏。
+  window.setTimeout(() => {
+    void cleanupOrphanImages(tasks)
+  }, 1000)
+}
+
+async function cleanupOrphanImages(tasks: TaskRecord[]) {
   // 收集所有任务引用的图片 id
   const referencedIds = new Set<string>()
   for (const t of tasks) {
@@ -189,12 +447,10 @@ export async function initStore() {
     for (const id of t.outputImages || []) referencedIds.add(id)
   }
 
-  // 预加载所有图片到缓存，同时清理孤立图片
+  // 仅清理孤立图片，不再预加载所有图片数据到内存缓存。
   const images = await getAllImages()
   for (const img of images) {
-    if (referencedIds.has(img.id)) {
-      imageCache.set(img.id, img.dataUrl)
-    } else {
+    if (!referencedIds.has(img.id)) {
       await deleteImage(img.id)
     }
   }
@@ -202,7 +458,17 @@ export async function initStore() {
 
 /** 提交新任务 */
 export async function submitTask() {
-  const { settings, prompt, inputImages, params, tasks, setTasks, showToast } =
+  const {
+    settings,
+    providers,
+    activeProviderId,
+    prompt,
+    inputImages,
+    params,
+    tasks,
+    setTasks,
+    showToast,
+  } =
     useStore.getState()
 
   if (!settings.apiKey) {
@@ -230,8 +496,13 @@ export async function submitTask() {
   }
 
   const taskId = genId()
+  const selectedProvider = findProviderById(providers, activeProviderId)
+  const requestSettings = selectedProvider ? getProviderSettings(selectedProvider) : settings
   const task: TaskRecord = {
     id: taskId,
+    providerId: selectedProvider?.id ?? null,
+    providerName: selectedProvider?.name?.trim() || UNKNOWN_TASK_PROVIDER_NAME,
+    deletedAt: null,
     prompt: prompt.trim(),
     params: normalizedParams,
     inputImageIds: inputImages.map((i) => i.id),
@@ -248,16 +519,20 @@ export async function submitTask() {
   await putTask(task)
 
   // 异步调用 API
-  executeTask(taskId)
+  executeTask(taskId, requestSettings)
 }
 
-async function executeTask(taskId: string) {
-  const { settings } = useStore.getState()
+async function executeTask(taskId: string, requestSettings?: AppSettings) {
+  const { settings, providers } = useStore.getState()
   const task = useStore.getState().tasks.find((t) => t.id === taskId)
   if (!task) return
 
+  const taskProvider = findProviderById(providers, task.providerId)
+  const providerSettings =
+    requestSettings ?? (taskProvider ? getProviderSettings(taskProvider) : settings)
+
   try {
-    // 获取输入图片 data URLs
+    // 获取输入图片地址（data URL 或公网 URL）
     const inputDataUrls: string[] = []
     for (const imgId of task.inputImageIds) {
       const dataUrl = await ensureImageCached(imgId)
@@ -265,7 +540,7 @@ async function executeTask(taskId: string) {
     }
 
     const result = await callImageApi({
-      settings,
+      settings: providerSettings,
       prompt: task.prompt,
       params: task.params,
       inputImageDataUrls: inputDataUrls,
@@ -314,9 +589,116 @@ function updateTaskInStore(taskId: string, patch: Partial<TaskRecord>) {
   if (task) putTask(task)
 }
 
+function collectReferencedImageIds(tasks: TaskRecord[], inputImages: InputImage[]): Set<string> {
+  const referenced = new Set<string>()
+  for (const task of tasks) {
+    for (const id of task.inputImageIds || []) referenced.add(id)
+    for (const id of task.outputImages || []) referenced.add(id)
+  }
+  for (const img of inputImages) referenced.add(img.id)
+  return referenced
+}
+
+function clearTaskUiState(taskIds: Set<string>) {
+  useStore.setState((state) => ({
+    selectedTaskIds: state.selectedTaskIds.filter((id) => !taskIds.has(id)),
+    detailTaskId:
+      state.detailTaskId && taskIds.has(state.detailTaskId) ? null : state.detailTaskId,
+  }))
+}
+
+async function purgeTasksPermanently(
+  tasksToRemove: TaskRecord[],
+  options?: {
+    silent?: boolean
+    successMessage?: string
+    taskUniverse?: TaskRecord[]
+  },
+) {
+  const { tasks, setTasks, inputImages, showToast } = useStore.getState()
+  if (!tasksToRemove.length) return 0
+
+  const taskIdsToRemove = new Set(tasksToRemove.map((task) => task.id))
+  const taskUniverse = options?.taskUniverse ?? tasks
+  const matchedTasks = taskUniverse.filter((task) => taskIdsToRemove.has(task.id))
+  if (!matchedTasks.length) return 0
+
+  const taskImageIds = new Set<string>()
+  for (const task of matchedTasks) {
+    for (const id of task.inputImageIds || []) taskImageIds.add(id)
+    for (const id of task.outputImages || []) taskImageIds.add(id)
+  }
+
+  const remainingStoreTasks = tasks.filter((task) => !taskIdsToRemove.has(task.id))
+  const remainingTasks = taskUniverse.filter((task) => !taskIdsToRemove.has(task.id))
+  setTasks(remainingStoreTasks)
+  clearTaskUiState(taskIdsToRemove)
+  await Promise.all(matchedTasks.map((task) => dbDeleteTask(task.id)))
+
+  const stillUsed = collectReferencedImageIds(remainingTasks, inputImages)
+  for (const imgId of taskImageIds) {
+    if (!stillUsed.has(imgId)) {
+      await deleteImage(imgId)
+      imageCache.delete(imgId)
+      imageLoadPromiseCache.delete(imgId)
+    }
+  }
+
+  if (!options?.silent) {
+    showToast(
+      options?.successMessage ??
+        (matchedTasks.length === 1 ? '记录已彻底删除' : `已彻底删除 ${matchedTasks.length} 条记录`),
+      'success',
+    )
+  }
+
+  return matchedTasks.length
+}
+
+export async function cleanupExpiredRecycleBinTasks() {
+  const tasks = await getAllTasks()
+  const cutoff = Date.now() - RECYCLE_BIN_RETENTION_MS
+  const expiredTasks = tasks.filter(
+    (task) => isTaskInRecycleBin(task) && (task.deletedAt ?? 0) <= cutoff,
+  )
+
+  if (!expiredTasks.length) return 0
+  return purgeTasksPermanently(expiredTasks, { silent: true, taskUniverse: tasks })
+}
+
+export function startRecycleBinJanitor() {
+  if (recycleBinJanitorId != null) {
+    return () => {
+      if (recycleBinJanitorId != null) {
+        window.clearInterval(recycleBinJanitorId)
+        recycleBinJanitorId = null
+      }
+    }
+  }
+
+  void cleanupExpiredRecycleBinTasks()
+  recycleBinJanitorId = window.setInterval(() => {
+    void cleanupExpiredRecycleBinTasks()
+  }, RECYCLE_BIN_POLL_INTERVAL_MS)
+
+  return () => {
+    if (recycleBinJanitorId != null) {
+      window.clearInterval(recycleBinJanitorId)
+      recycleBinJanitorId = null
+    }
+  }
+}
+
 /** 复用配置 */
 export async function reuseConfig(task: TaskRecord) {
-  const { setPrompt, setParams, setInputImages, showToast } = useStore.getState()
+  const { providers, setActiveProvider, setPrompt, setParams, setInputImages, showToast } =
+    useStore.getState()
+
+  const provider = findProviderById(providers, task.providerId)
+  if (provider) {
+    setActiveProvider(provider.id)
+  }
+
   setPrompt(task.prompt)
   setParams(task.params)
 
@@ -349,38 +731,83 @@ export async function editOutputs(task: TaskRecord) {
   showToast(`已添加 ${added} 张输出图到输入`, 'success')
 }
 
+/** 批量移入回收站 */
+export async function removeTasks(tasksToRemove: TaskRecord[]) {
+  const { tasks, setTasks, showToast } = useStore.getState()
+  if (!tasksToRemove.length) return
+
+  const taskIdsToRemove = new Set(tasksToRemove.map((task) => task.id))
+  const matchedTasks = tasks.filter(
+    (task) => taskIdsToRemove.has(task.id) && !isTaskInRecycleBin(task),
+  )
+  if (!matchedTasks.length) return
+
+  const deletedAt = Date.now()
+  const updatedTasks = tasks.map((task) =>
+    taskIdsToRemove.has(task.id) && !isTaskInRecycleBin(task)
+      ? { ...task, deletedAt }
+      : task,
+  )
+  setTasks(updatedTasks)
+  clearTaskUiState(taskIdsToRemove)
+  await Promise.all(
+    matchedTasks.map((task) =>
+      putTask({
+        ...task,
+        deletedAt,
+      }),
+    ),
+  )
+
+  showToast(
+    matchedTasks.length === 1
+      ? '记录已移入回收站'
+      : `已将 ${matchedTasks.length} 条记录移入回收站`,
+    'success',
+  )
+}
+
 /** 删除单条任务 */
 export async function removeTask(task: TaskRecord) {
-  const { tasks, setTasks, inputImages, showToast } = useStore.getState()
+  await removeTasks([task])
+}
 
-  // 收集此任务关联的图片
-  const taskImageIds = new Set([
-    ...(task.inputImageIds || []),
-    ...(task.outputImages || []),
-  ])
+/** 批量恢复任务 */
+export async function restoreTasks(tasksToRestore: TaskRecord[]) {
+  const { tasks, setTasks, showToast } = useStore.getState()
+  if (!tasksToRestore.length) return
 
-  // 从列表移除
-  const remaining = tasks.filter((t) => t.id !== task.id)
-  setTasks(remaining)
-  await dbDeleteTask(task.id)
+  const taskIdsToRestore = new Set(tasksToRestore.map((task) => task.id))
+  const matchedTasks = tasks.filter(
+    (task) => taskIdsToRestore.has(task.id) && isTaskInRecycleBin(task),
+  )
+  if (!matchedTasks.length) return
 
-  // 找出其他任务仍引用的图片
-  const stillUsed = new Set<string>()
-  for (const t of remaining) {
-    for (const id of t.inputImageIds || []) stillUsed.add(id)
-    for (const id of t.outputImages || []) stillUsed.add(id)
-  }
-  for (const img of inputImages) stillUsed.add(img.id)
+  const updatedTasks = tasks.map((task) =>
+    taskIdsToRestore.has(task.id) && isTaskInRecycleBin(task)
+      ? { ...task, deletedAt: null }
+      : task,
+  )
+  setTasks(updatedTasks)
+  clearTaskUiState(taskIdsToRestore)
+  await Promise.all(
+    matchedTasks.map((task) =>
+      putTask({
+        ...task,
+        deletedAt: null,
+      }),
+    ),
+  )
 
-  // 删除孤立图片
-  for (const imgId of taskImageIds) {
-    if (!stillUsed.has(imgId)) {
-      await deleteImage(imgId)
-      imageCache.delete(imgId)
-    }
-  }
+  showToast(
+    matchedTasks.length === 1 ? '记录已恢复' : `已恢复 ${matchedTasks.length} 条记录`,
+    'success',
+  )
+}
 
-  showToast('记录已删除', 'success')
+/** 恢复单条任务 */
+export async function restoreTask(task: TaskRecord) {
+  await restoreTasks([task])
 }
 
 /** 清空所有数据（含配置重置） */
@@ -388,11 +815,20 @@ export async function clearAllData() {
   await dbClearTasks()
   await clearImages()
   imageCache.clear()
-  const { setTasks, clearInputImages, setSettings, setParams, showToast } = useStore.getState()
+  imageLoadPromiseCache.clear()
+  const {
+    setTasks,
+    clearInputImages,
+    replaceProviderState,
+    setParams,
+    setTaskView,
+    showToast,
+  } = useStore.getState()
   setTasks([])
   clearInputImages()
-  setSettings({ ...DEFAULT_SETTINGS })
+  replaceProviderState([])
   setParams({ ...DEFAULT_PARAMS })
+  setTaskView('gallery')
   showToast('所有数据已清空', 'success')
 }
 
@@ -422,7 +858,7 @@ export async function exportData() {
   try {
     const tasks = await getAllTasks()
     const images = await getAllImages()
-    const { settings } = useStore.getState()
+    const { settings, providers, activeProviderId } = useStore.getState()
     const exportedAt = Date.now()
     const imageCreatedAtFallback = new Map<string, number>()
 
@@ -439,17 +875,24 @@ export async function exportData() {
     const zipFiles: Record<string, Uint8Array | [Uint8Array, { mtime: Date }]> = {}
 
     for (const img of images) {
+      const createdAt = img.createdAt ?? imageCreatedAtFallback.get(img.id) ?? exportedAt
+      if (isRemoteImageUrl(img.dataUrl)) {
+        imageFiles[img.id] = { url: img.dataUrl, createdAt, source: img.source }
+        continue
+      }
+
       const { ext, bytes } = dataUrlToBytes(img.dataUrl)
       const path = `images/${img.id}.${ext}`
-      const createdAt = img.createdAt ?? imageCreatedAtFallback.get(img.id) ?? exportedAt
       imageFiles[img.id] = { path, createdAt, source: img.source }
       zipFiles[path] = [bytes, { mtime: new Date(createdAt) }]
     }
 
     const manifest: ExportData = {
-      version: 2,
+      version: 3,
       exportedAt: new Date(exportedAt).toISOString(),
       settings,
+      providers,
+      activeProviderId,
       tasks,
       imageFiles,
     }
@@ -489,6 +932,13 @@ export async function importData(file: File) {
 
     // 还原图片
     for (const [id, info] of Object.entries(data.imageFiles)) {
+      if (info.url) {
+        await putImage({ id, dataUrl: info.url, createdAt: info.createdAt, source: info.source })
+        imageCache.set(id, info.url)
+        continue
+      }
+
+      if (!info.path) continue
       const bytes = unzipped[info.path]
       if (!bytes) continue
       const dataUrl = bytesToDataUrl(bytes, info.path)
@@ -500,8 +950,13 @@ export async function importData(file: File) {
       await putTask(task)
     }
 
-    if (data.settings) {
-      useStore.getState().setSettings(data.settings)
+    if (Array.isArray(data.providers) && data.providers.length > 0) {
+      useStore.getState().replaceProviderState(data.providers, data.activeProviderId)
+    } else if (data.settings) {
+      useStore.getState().replaceProviderState(
+        [createProviderConfig(data.settings, DEFAULT_PROVIDER_NAME)],
+        undefined,
+      )
     }
 
     const tasks = await getAllTasks()
@@ -526,6 +981,33 @@ export async function addImageFromFile(file: File): Promise<void> {
   const id = await hashDataUrl(dataUrl)
   imageCache.set(id, dataUrl)
   useStore.getState().addInputImage({ id, dataUrl })
+}
+
+export function normalizeImageUrl(url: string): string {
+  const trimmed = url.trim()
+  if (!trimmed) {
+    throw new Error('图片 URL 不能为空')
+  }
+
+  let parsed: URL
+  try {
+    parsed = new URL(trimmed)
+  } catch {
+    throw new Error('图片 URL 格式无效')
+  }
+
+  if (!/^https?:$/i.test(parsed.protocol)) {
+    throw new Error('只支持 http 或 https 的公网图片 URL')
+  }
+
+  return parsed.toString()
+}
+
+export async function addImageFromUrl(url: string): Promise<void> {
+  const normalizedUrl = normalizeImageUrl(url)
+  const id = await hashDataUrl(normalizedUrl)
+  imageCache.set(id, normalizedUrl)
+  useStore.getState().addInputImage({ id, dataUrl: normalizedUrl })
 }
 
 function fileToDataUrl(file: File): Promise<string> {

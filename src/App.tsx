@@ -1,7 +1,8 @@
 import { useEffect } from 'react'
-import { initStore } from './store'
+import { initStore, startRecycleBinJanitor } from './store'
 import { useStore } from './store'
 import { normalizeBaseUrl } from './lib/api'
+import type { ApiProtocol, RequestMode } from './types'
 import Header from './components/Header'
 import SearchBar from './components/SearchBar'
 import TaskGrid from './components/TaskGrid'
@@ -17,8 +18,18 @@ export default function App() {
   const setSettings = useStore((s) => s.setSettings)
 
   useEffect(() => {
+    const isApiProtocol = (value: string): value is ApiProtocol =>
+      value === 'auto' || value === 'images' || value === 'responses'
+    const isRequestMode = (value: string): value is RequestMode =>
+      value === 'direct' || value === 'local_proxy'
+
     const searchParams = new URLSearchParams(window.location.search)
-    const nextSettings: { baseUrl?: string; apiKey?: string } = {}
+    const nextSettings: {
+      baseUrl?: string
+      apiKey?: string
+      apiProtocol?: ApiProtocol
+      requestMode?: RequestMode
+    } = {}
 
     const apiUrlParam = searchParams.get('apiUrl')
     if (apiUrlParam !== null) {
@@ -30,11 +41,23 @@ export default function App() {
       nextSettings.apiKey = apiKeyParam.trim()
     }
 
+    const apiProtocolParam = searchParams.get('apiProtocol')
+    if (apiProtocolParam !== null && isApiProtocol(apiProtocolParam.trim())) {
+      nextSettings.apiProtocol = apiProtocolParam.trim()
+    }
+
+    const requestModeParam = searchParams.get('requestMode')
+    if (requestModeParam !== null && isRequestMode(requestModeParam.trim())) {
+      nextSettings.requestMode = requestModeParam.trim()
+    }
+
     if (Object.keys(nextSettings).length > 0) {
       setSettings(nextSettings)
 
       searchParams.delete('apiUrl')
       searchParams.delete('apiKey')
+      searchParams.delete('apiProtocol')
+      searchParams.delete('requestMode')
 
       const nextSearch = searchParams.toString()
       const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash}`
@@ -42,6 +65,11 @@ export default function App() {
     }
 
     initStore()
+    const stopRecycleBinJanitor = startRecycleBinJanitor()
+
+    return () => {
+      stopRecycleBinJanitor()
+    }
   }, [setSettings])
 
   return (

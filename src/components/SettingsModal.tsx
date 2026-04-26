@@ -1,26 +1,49 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { normalizeBaseUrl } from '../lib/api'
+import { readClientDevProxyConfig } from '../lib/devProxy'
 import { useStore, exportData, importData, clearAllData } from '../store'
-import { DEFAULT_SETTINGS, type AppSettings } from '../types'
+import { DEFAULT_SETTINGS, type AppSettings, type ApiProtocol, type RequestMode } from '../types'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
+import Select from './Select'
+
+const API_PROTOCOL_OPTIONS: Array<{ label: string; value: ApiProtocol }> = [
+  { label: '自动', value: 'auto' },
+  { label: 'Images API', value: 'images' },
+  { label: 'Responses API', value: 'responses' },
+]
+
+const REQUEST_MODE_OPTIONS: Array<{ label: string; value: RequestMode }> = [
+  { label: '本地代理', value: 'local_proxy' },
+  { label: '直连', value: 'direct' },
+]
 
 export default function SettingsModal() {
   const showSettings = useStore((s) => s.showSettings)
   const setShowSettings = useStore((s) => s.setShowSettings)
   const settings = useStore((s) => s.settings)
+  const providers = useStore((s) => s.providers)
+  const activeProviderId = useStore((s) => s.activeProviderId)
   const setSettings = useStore((s) => s.setSettings)
+  const setActiveProvider = useStore((s) => s.setActiveProvider)
+  const createProvider = useStore((s) => s.createProvider)
+  const updateProviderName = useStore((s) => s.updateProviderName)
+  const removeProvider = useStore((s) => s.removeProvider)
   const setConfirmDialog = useStore((s) => s.setConfirmDialog)
   const importInputRef = useRef<HTMLInputElement>(null)
   const [draft, setDraft] = useState<AppSettings>(settings)
   const [timeoutInput, setTimeoutInput] = useState(String(settings.timeout))
   const [showApiKey, setShowApiKey] = useState(false)
+  const [providerNameInput, setProviderNameInput] = useState('')
+  const proxyConfig = readClientDevProxyConfig()
+  const activeProvider = providers.find((provider) => provider.id === activeProviderId) ?? providers[0]
 
   useEffect(() => {
     if (showSettings) {
       setDraft(settings)
       setTimeoutInput(String(settings.timeout))
+      setProviderNameInput(activeProvider?.name ?? '')
     }
-  }, [showSettings, settings])
+  }, [showSettings, settings, activeProvider])
 
   const commitSettings = (nextDraft: AppSettings) => {
     const normalizedDraft = {
@@ -28,7 +51,10 @@ export default function SettingsModal() {
       baseUrl: normalizeBaseUrl(nextDraft.baseUrl.trim() || DEFAULT_SETTINGS.baseUrl),
       apiKey: nextDraft.apiKey,
       model: nextDraft.model.trim() || DEFAULT_SETTINGS.model,
+      responsesImageModel: nextDraft.responsesImageModel.trim() || DEFAULT_SETTINGS.responsesImageModel,
       timeout: Number(nextDraft.timeout) || DEFAULT_SETTINGS.timeout,
+      apiProtocol: nextDraft.apiProtocol || DEFAULT_SETTINGS.apiProtocol,
+      requestMode: nextDraft.requestMode || DEFAULT_SETTINGS.requestMode,
     }
     setDraft(normalizedDraft)
     setSettings(normalizedDraft)
@@ -53,6 +79,25 @@ export default function SettingsModal() {
     setTimeoutInput(String(normalizedTimeout))
     commitSettings({ ...draft, timeout: normalizedTimeout })
   }, [draft, timeoutInput])
+
+  const commitProviderName = useCallback(() => {
+    if (!activeProvider) return
+    const nextName = providerNameInput.trim() || activeProvider.name
+    setProviderNameInput(nextName)
+    updateProviderName(activeProvider.id, nextName)
+  }, [activeProvider, providerNameInput, updateProviderName])
+
+  const flushDraft = useCallback(() => {
+    const nextTimeout = Number(timeoutInput)
+    const normalizedTimeout =
+      timeoutInput.trim() === '' || Number.isNaN(nextTimeout) ? draft.timeout : nextTimeout
+    commitSettings({ ...draft, timeout: normalizedTimeout })
+    if (activeProvider) {
+      const nextName = providerNameInput.trim() || activeProvider.name
+      setProviderNameInput(nextName)
+      updateProviderName(activeProvider.id, nextName)
+    }
+  }, [activeProvider, draft, providerNameInput, timeoutInput, updateProviderName])
 
   useCloseOnEscape(showSettings, handleClose)
 
@@ -104,6 +149,68 @@ export default function SettingsModal() {
               API 配置
             </h4>
             <div className="space-y-4">
+              <div className="grid grid-cols-[1fr_auto_auto] gap-2">
+                <label className="block">
+                  <span className="block text-xs text-gray-500 dark:text-gray-400 mb-1">供应商</span>
+                  <Select
+                    value={activeProviderId}
+                    onChange={(value) => {
+                      flushDraft()
+                      setActiveProvider(String(value))
+                    }}
+                    options={providers.map((provider) => ({
+                      label: provider.name,
+                      value: provider.id,
+                    }))}
+                    className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
+                  />
+                </label>
+                <div className="flex flex-col justify-end">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      flushDraft()
+                      createProvider()
+                    }}
+                    className="rounded-xl bg-gray-100/80 px-3 py-2 text-sm text-gray-600 transition hover:bg-gray-200 dark:bg-white/[0.06] dark:text-gray-300 dark:hover:bg-white/[0.1]"
+                  >
+                    新建
+                  </button>
+                </div>
+                <div className="flex flex-col justify-end">
+                  <button
+                    type="button"
+                    disabled={providers.length <= 1}
+                    onClick={() =>
+                      activeProvider &&
+                      setConfirmDialog({
+                        title: '删除供应商',
+                        message: `确定删除供应商“${activeProvider.name}”吗？`,
+                        action: () => removeProvider(activeProvider.id),
+                      })
+                    }
+                    className="rounded-xl border border-red-200/80 bg-red-50/50 px-3 py-2 text-sm text-red-500 transition hover:bg-red-100/80 disabled:cursor-not-allowed disabled:opacity-50 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-400 dark:hover:bg-red-500/20"
+                  >
+                    删除
+                  </button>
+                </div>
+              </div>
+
+              <label className="block">
+                <span className="block text-xs text-gray-500 dark:text-gray-400 mb-1">供应商名称</span>
+                <input
+                  value={providerNameInput}
+                  onChange={(e) => setProviderNameInput(e.target.value)}
+                  onBlur={commitProviderName}
+                  type="text"
+                  placeholder="供应商名称"
+                  className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
+                />
+                <div className="mt-1 text-[10px] text-gray-400 dark:text-gray-500">
+                  不同供应商会分别保存 API URL、API Key、协议、模型和超时配置。
+                </div>
+              </label>
+
               <label className="block">
                 <span className="block text-xs text-gray-500 dark:text-gray-400 mb-1">API URL</span>
                 <input
@@ -157,6 +264,54 @@ export default function SettingsModal() {
               </div>
 
               <label className="block">
+                <span className="block text-xs text-gray-500 dark:text-gray-400 mb-1">API 协议</span>
+                <Select
+                  value={draft.apiProtocol}
+                  onChange={(value) => commitSettings({ ...draft, apiProtocol: value as ApiProtocol })}
+                  options={API_PROTOCOL_OPTIONS}
+                  className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
+                />
+                <div className="mt-1 text-[10px] text-gray-400 dark:text-gray-500">
+                  <div>自动：优先走 Images API，接口不支持时再回退到 Responses API。</div>
+                  <div>
+                    支持通过查询参数覆盖：
+                    <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded ml-1">?apiProtocol=auto|images|responses</code>
+                  </div>
+                </div>
+              </label>
+
+              <label className="block">
+                <span className="block text-xs text-gray-500 dark:text-gray-400 mb-1">请求模式</span>
+                <Select
+                  value={draft.requestMode}
+                  onChange={(value) => commitSettings({ ...draft, requestMode: value as RequestMode })}
+                  options={REQUEST_MODE_OPTIONS}
+                  className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
+                />
+                <div className="mt-1 text-[10px] text-gray-400 dark:text-gray-500">
+                  <div>直连：浏览器直接请求 API URL。</div>
+                  <div>本地代理：先请求同源代理，再由本地 dev server 转发到 API URL，可绕过浏览器 CORS 预检。</div>
+                  <div>
+                    支持通过查询参数覆盖：
+                    <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded ml-1">?requestMode=direct|local_proxy</code>
+                  </div>
+                  {draft.requestMode === 'local_proxy' ? (
+                    proxyConfig?.enabled ? (
+                      <div>
+                        已检测到本地代理前缀：
+                        <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded ml-1">{proxyConfig.prefix}</code>
+                        ，仅 <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">npm run dev</code> 生效。
+                      </div>
+                    ) : (
+                      <div className="text-amber-500 dark:text-amber-400">
+                        未检测到可用代理配置。请确认 <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">dev-proxy.config.json</code> 存在，并重启 dev server。
+                      </div>
+                    )
+                  ) : null}
+                </div>
+              </label>
+
+              <label className="block">
                 <span className="block text-xs text-gray-500 dark:text-gray-400 mb-1">模型 ID</span>
                 <input
                   value={draft.model}
@@ -166,6 +321,24 @@ export default function SettingsModal() {
                   placeholder="gpt-image-2"
                   className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
                 />
+                <div className="mt-1 text-[10px] text-gray-400 dark:text-gray-500">
+                  Images API 下这里是直接调用的图片模型；Responses API 下这里是顶层主模型，例如 <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">gpt-5.3-codex</code>。
+                </div>
+              </label>
+
+              <label className="block">
+                <span className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Responses 图像模型</span>
+                <input
+                  value={draft.responsesImageModel}
+                  onChange={(e) => setDraft((prev) => ({ ...prev, responsesImageModel: e.target.value }))}
+                  onBlur={(e) => commitSettings({ ...draft, responsesImageModel: e.target.value })}
+                  type="text"
+                  placeholder="gpt-image-2"
+                  className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
+                />
+                <div className="mt-1 text-[10px] text-gray-400 dark:text-gray-500">
+                  仅 Responses API 生效，会作为 <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">tools[].model</code> 传入，通常填 <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">gpt-image-2</code>。
+                </div>
               </label>
 
               <label className="block">

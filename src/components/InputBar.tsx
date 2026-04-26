@@ -1,5 +1,5 @@
 import { useRef, useEffect, useCallback, useState } from 'react'
-import { useStore, submitTask, addImageFromFile } from '../store'
+import { useStore, submitTask, addImageFromFile, addImageFromUrl } from '../store'
 import { DEFAULT_PARAMS } from '../types'
 import { normalizeImageSize } from '../lib/size'
 import Select from './Select'
@@ -21,6 +21,10 @@ function ButtonTooltip({ visible, text }: { visible: boolean; text: string }) {
 /** API 支持的最大参考图数量 */
 const API_MAX_IMAGES = 16
 
+function isRemotePreviewUrl(value: string): boolean {
+  return /^https?:\/\//i.test(value)
+}
+
 function useIsMobile() {
   const [isMobile, setIsMobile] = useState(window.innerWidth < 640)
   useEffect(() => {
@@ -37,6 +41,9 @@ export default function InputBar() {
   const inputImages = useStore((s) => s.inputImages)
   const removeInputImage = useStore((s) => s.removeInputImage)
   const clearInputImages = useStore((s) => s.clearInputImages)
+  const providers = useStore((s) => s.providers)
+  const activeProviderId = useStore((s) => s.activeProviderId)
+  const setActiveProvider = useStore((s) => s.setActiveProvider)
   const params = useStore((s) => s.params)
   const setParams = useStore((s) => s.setParams)
   const settings = useStore((s) => s.settings)
@@ -55,6 +62,8 @@ export default function InputBar() {
   const [attachHover, setAttachHover] = useState(false)
   const [mobileCollapsed, setMobileCollapsed] = useState(false)
   const [showSizePicker, setShowSizePicker] = useState(false)
+  const [showImageUrlInput, setShowImageUrlInput] = useState(false)
+  const [imageUrlInput, setImageUrlInput] = useState('')
   const handleRef = useRef<HTMLDivElement>(null)
   const dragTouchRef = useRef({ startY: 0, moved: false })
   const [outputCompressionInput, setOutputCompressionInput] = useState(
@@ -63,9 +72,15 @@ export default function InputBar() {
   const [nInput, setNInput] = useState(String(params.n))
   const dragCounter = useRef(0)
   const isMobile = useIsMobile()
+  const providerOptions = providers.map((provider) => ({
+    label: provider.name,
+    value: provider.id,
+  }))
 
   const canSubmit = (prompt.trim() || inputImages.length) && settings.apiKey
   const atImageLimit = inputImages.length >= API_MAX_IMAGES
+  const localInputImageCount = inputImages.filter((img) => !isRemotePreviewUrl(img.dataUrl)).length
+  const remoteInputImageCount = inputImages.length - localInputImageCount
 
   useEffect(() => {
     setOutputCompressionInput(
@@ -142,6 +157,28 @@ export default function InputBar() {
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     await handleFilesRef.current(e.target.files || [])
     e.target.value = ''
+  }
+
+  const handleAddImageUrl = async () => {
+    try {
+      const currentCount = useStore.getState().inputImages.length
+      if (currentCount >= API_MAX_IMAGES) {
+        useStore.getState().showToast(
+          `参考图数量已达上限（${API_MAX_IMAGES} 张），无法继续添加`,
+          'error',
+        )
+        return
+      }
+
+      await addImageFromUrl(imageUrlInput)
+      setImageUrlInput('')
+      setShowImageUrlInput(false)
+    } catch (err) {
+      useStore.getState().showToast(
+        `图片 URL 添加失败：${err instanceof Error ? err.message : String(err)}`,
+        'error',
+      )
+    }
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -309,6 +346,13 @@ export default function InputBar() {
                 onClick={() => setLightboxImageId(img.id, inputImages.map((i) => i.id))}
                 alt=""
               />
+              <span
+                className={`absolute left-1 top-1 rounded px-1 py-0.5 text-[9px] leading-none text-white shadow-sm ${
+                  isRemotePreviewUrl(img.dataUrl) ? 'bg-emerald-500/90' : 'bg-amber-500/90'
+                }`}
+              >
+                {isRemotePreviewUrl(img.dataUrl) ? 'URL' : '本地'}
+              </span>
             </div>
             <span
               className="absolute -top-2 -right-2 w-[22px] h-[22px] rounded-full bg-red-500 text-white flex items-center justify-center cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity shadow-md hover:bg-red-600"
@@ -344,6 +388,15 @@ export default function InputBar() {
 
   const renderParams = (cols: string) => (
     <div className={`grid ${cols} gap-2 text-xs flex-1`}>
+      <label className="flex flex-col gap-0.5">
+        <span className="text-gray-400 dark:text-gray-500 ml-1">供应商</span>
+        <Select
+          value={activeProviderId}
+          onChange={(val) => setActiveProvider(String(val))}
+          options={providerOptions}
+          className={selectClass}
+        />
+      </label>
       <label className="flex flex-col gap-0.5">
         <span className="text-gray-400 dark:text-gray-500 ml-1">尺寸</span>
         <button
@@ -492,12 +545,22 @@ export default function InputBar() {
                   </div>
                 </div>
                 {mobileCollapsed && (
-                  <div className="text-xs text-gray-400 dark:text-gray-500 mb-2 ml-1">{inputImages.length} 张参考图</div>
+                  <div className="text-xs text-gray-400 dark:text-gray-500 mb-2 ml-1">
+                    {inputImages.length} 张参考图
+                    {remoteInputImageCount > 0 ? ` · URL ${remoteInputImageCount}` : ''}
+                    {localInputImageCount > 0 ? ` · 本地 ${localInputImageCount}` : ''}
+                  </div>
                 )}
               </>
             ) : (
               renderImageThumbs()
             )
+          )}
+
+          {settings.apiProtocol === 'responses' && localInputImageCount > 0 && (
+            <div className="mt-3 rounded-2xl border border-amber-200/80 bg-amber-50/80 px-4 py-3 text-xs text-amber-700 shadow-sm dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-300">
+              当前参考图里有 {localInputImageCount} 张“本地”图片。它们会直接内联进 `Responses` 请求体，并在发送前自动缩边压缩；如果中转站处理较慢，仍可能触发 `524`，此时优先使用链条按钮添加的公网 `URL` 参考图会更稳。
+            </div>
           )}
 
           {/* 输入框 */}
@@ -511,11 +574,48 @@ export default function InputBar() {
             className="w-full px-4 py-3 rounded-2xl border border-gray-200/60 dark:border-white/[0.08] bg-white/50 dark:bg-white/[0.03] text-sm focus:outline-none leading-relaxed resize-none shadow-sm transition-[border-color,box-shadow] duration-200"
           />
 
+          {showImageUrlInput && (
+            <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+              <input
+                value={imageUrlInput}
+                onChange={(e) => setImageUrlInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    handleAddImageUrl()
+                  }
+                }}
+                type="url"
+                placeholder="粘贴公网图片 URL，例如 https://example.com/reference.png"
+                className="flex-1 px-4 py-2.5 rounded-2xl border border-gray-200/60 dark:border-white/[0.08] bg-white/50 dark:bg-white/[0.03] text-sm focus:outline-none shadow-sm"
+              />
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={handleAddImageUrl}
+                  className="px-4 py-2.5 rounded-2xl bg-blue-500 text-white text-sm font-medium hover:bg-blue-600 transition-all shadow-sm"
+                >
+                  添加 URL
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowImageUrlInput(false)
+                    setImageUrlInput('')
+                  }}
+                  className="px-4 py-2.5 rounded-2xl bg-gray-200 dark:bg-white/[0.06] text-gray-600 dark:text-gray-300 text-sm font-medium hover:bg-gray-300 dark:hover:bg-white/[0.1] transition-all shadow-sm"
+                >
+                  取消
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* 参数 + 按钮 */}
           <div className="mt-3">
             {/* 桌面端布局 */}
             <div className="hidden sm:flex items-end justify-between gap-3">
-              {renderParams('grid-cols-6')}
+              {renderParams('grid-cols-7')}
 
               <div className="flex gap-2 flex-shrink-0 mb-0.5">
                 <div
@@ -538,6 +638,16 @@ export default function InputBar() {
                     </svg>
                   </button>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => setShowImageUrlInput((v) => !v)}
+                  className="p-2.5 rounded-xl bg-gray-200 dark:bg-white/[0.06] hover:bg-gray-300 dark:hover:bg-white/[0.1] text-gray-500 dark:text-gray-300 transition-all shadow-sm"
+                  title="添加公网图片 URL"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 010 5.656l-1.414 1.414a4 4 0 01-5.657-5.656l1.414-1.414m3-3a4 4 0 015.657 0l1.414 1.414a4 4 0 01-5.657 5.656l-1.414-1.414" />
+                  </svg>
+                </button>
                 <div
                   className="relative"
                   onMouseEnter={() => setSubmitHover(true)}
@@ -592,6 +702,16 @@ export default function InputBar() {
                     </svg>
                   </button>
                 </div>
+                <button
+                  type="button"
+                  onClick={() => setShowImageUrlInput((v) => !v)}
+                  className="p-2.5 rounded-xl bg-gray-200 dark:bg-white/[0.06] hover:bg-gray-300 dark:hover:bg-white/[0.1] text-gray-500 dark:text-gray-300 transition-all shadow-sm flex-shrink-0"
+                  title="添加公网图片 URL"
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 010 5.656l-1.414 1.414a4 4 0 01-5.657-5.656l1.414-1.414m3-3a4 4 0 015.657 0l1.414 1.414a4 4 0 01-5.657 5.656l-1.414-1.414" />
+                  </svg>
+                </button>
                 <div
                   className="relative flex-1"
                   onMouseEnter={() => setSubmitHover(true)}

@@ -37,7 +37,7 @@ export default function ConfirmDialog() {
             }}
             className="flex-1 py-2 rounded-lg bg-red-500 text-white text-sm font-medium hover:bg-red-600 transition"
           >
-            确认删除
+            {confirmDialog.confirmText || '确认'}
           </button>
         </div>
       </div>

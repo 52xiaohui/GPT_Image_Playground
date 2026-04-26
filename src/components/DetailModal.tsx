@@ -1,10 +1,22 @@
 import { useEffect, useState, useMemo, useRef } from 'react'
-import { useStore, getCachedImage, ensureImageCached, reuseConfig, editOutputs, removeTask } from '../store'
+import {
+  useStore,
+  getCachedImage,
+  ensureImageCached,
+  reuseConfig,
+  editOutputs,
+  removeTask,
+  restoreTask,
+} from '../store'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import { formatImageRatio } from '../lib/size'
+import { isTaskInRecycleBin, resolveTaskProviderName } from '../types'
+
+const RECYCLE_BIN_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 
 export default function DetailModal() {
   const tasks = useStore((s) => s.tasks)
+  const providers = useStore((s) => s.providers)
   const detailTaskId = useStore((s) => s.detailTaskId)
   const setDetailTaskId = useStore((s) => s.setDetailTaskId)
   const setLightboxImageId = useStore((s) => s.setLightboxImageId)
@@ -105,6 +117,9 @@ export default function DetailModal() {
   const outputLen = task.outputImages?.length || 0
   const currentImageRatio = currentOutputImageId ? imageRatios[currentOutputImageId] : ''
   const currentImageSize = currentOutputImageId ? imageSizes[currentOutputImageId] : ''
+  const providerName = resolveTaskProviderName(task, providers)
+  const inRecycleBin = isTaskInRecycleBin(task)
+  const cleanupDueAt = inRecycleBin ? (task.deletedAt ?? 0) + RECYCLE_BIN_RETENTION_MS : null
 
   const formatTime = (ts: number | null) => {
     if (!ts) return ''
@@ -132,9 +147,20 @@ export default function DetailModal() {
   const handleDelete = () => {
     setDetailTaskId(null)
     setConfirmDialog({
-      title: '删除记录',
-      message: '确定要删除这条记录吗？关联的图片资源也会被清理（如果没有其他任务引用）。',
+      title: '移入回收站',
+      message: '确定要将这条记录移入回收站吗？提示词、配置和图片会暂时保留，可在回收站恢复。',
+      confirmText: '移入回收站',
       action: () => removeTask(task),
+    })
+  }
+
+  const handleRestore = () => {
+    setDetailTaskId(null)
+    setConfirmDialog({
+      title: '恢复记录',
+      message: '确定要将这条记录恢复到画廊吗？',
+      confirmText: '恢复',
+      action: () => restoreTask(task),
     })
   }
 
@@ -201,24 +227,31 @@ export default function DetailModal() {
         <div ref={imagePanelRef} className="md:w-1/2 w-full h-64 md:h-auto bg-gray-100 dark:bg-black/20 relative flex items-center justify-center flex-shrink-0 min-h-[16rem]">
           {task.status === 'done' && outputLen > 0 && (
             <>
-              <img
-                ref={mainImageRef}
-                src={currentOutputImageSrc}
-                className="max-w-[calc(100%-2rem)] max-h-[calc(100%-2rem)] object-contain cursor-pointer"
-                onLoad={() => {
-                  const panel = imagePanelRef.current
-                  const image = mainImageRef.current
-                  if (!panel || !image) return
+              {currentOutputImageSrc ? (
+                <img
+                  ref={mainImageRef}
+                  src={currentOutputImageSrc}
+                  className="max-w-[calc(100%-2rem)] max-h-[calc(100%-2rem)] object-contain cursor-pointer"
+                  onLoad={() => {
+                    const panel = imagePanelRef.current
+                    const image = mainImageRef.current
+                    if (!panel || !image) return
 
-                  const panelRect = panel.getBoundingClientRect()
-                  const imageRect = image.getBoundingClientRect()
-                  setImageLabelLeft(Math.max(8, imageRect.left - panelRect.left))
-                }}
-                onClick={() =>
-                  setLightboxImageId(task.outputImages[imageIndex], task.outputImages)
-                }
-                alt=""
-              />
+                    const panelRect = panel.getBoundingClientRect()
+                    const imageRect = image.getBoundingClientRect()
+                    setImageLabelLeft(Math.max(8, imageRect.left - panelRect.left))
+                  }}
+                  onClick={() =>
+                    setLightboxImageId(task.outputImages[imageIndex], task.outputImages)
+                  }
+                  alt=""
+                />
+              ) : (
+                <svg className="w-10 h-10 text-blue-400 animate-spin" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                </svg>
+              )}
               <div className="absolute top-[15px] flex items-center gap-1.5" style={{ left: imageLabelLeft }}>
                 {currentImageRatio && currentImageSize ? (
                   <>
@@ -359,15 +392,20 @@ export default function DetailModal() {
                   </button>
                 </div>
                 <div className="flex gap-2 flex-wrap">
-                  {task.inputImageIds.map((imgId) => (
-                    <img
-                      key={imgId}
-                      src={imageSrcs[imgId] || ''}
-                      className="w-16 h-16 rounded-lg object-cover border border-gray-200 dark:border-white/[0.08] cursor-pointer hover:opacity-80 transition"
-                      onClick={() => setLightboxImageId(imgId, task.inputImageIds)}
-                      alt=""
-                    />
-                  ))}
+                  {task.inputImageIds.map((imgId) => {
+                    const src = imageSrcs[imgId]
+                    if (!src) return null
+
+                    return (
+                      <img
+                        key={imgId}
+                        src={src}
+                        className="w-16 h-16 rounded-lg object-cover border border-gray-200 dark:border-white/[0.08] cursor-pointer hover:opacity-80 transition"
+                        onClick={() => setLightboxImageId(imgId, task.inputImageIds)}
+                        alt=""
+                      />
+                    )
+                  })}
                 </div>
               </div>
             )}
@@ -377,6 +415,11 @@ export default function DetailModal() {
               参数配置
             </h3>
             <div className="grid grid-cols-2 gap-2 text-xs mb-4">
+              <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2">
+                <span className="text-gray-400 dark:text-gray-500">供应商</span>
+                <br />
+                <span className="text-gray-700 dark:text-gray-300 font-medium break-all">{providerName}</span>
+              </div>
               <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2">
                 <span className="text-gray-400 dark:text-gray-500">尺寸</span>
                 <br />
@@ -417,39 +460,60 @@ export default function DetailModal() {
             <div className="text-xs text-gray-400 dark:text-gray-500 mb-4">
               <span>创建于 {formatTime(task.createdAt)}</span>
               {formatDuration() && <span> · 耗时 {formatDuration()}</span>}
+              {inRecycleBin && task.deletedAt ? (
+                <>
+                  <br />
+                  <span>移入回收站于 {formatTime(task.deletedAt)}</span>
+                  {cleanupDueAt ? <span> · 预计清理于 {formatTime(cleanupDueAt)}</span> : null}
+                </>
+              ) : null}
             </div>
           </div>
 
           {/* 操作按钮 */}
           <div className="flex gap-2 pt-3 border-t border-gray-100 dark:border-white/[0.08]">
-            <button
-              onClick={handleReuse}
-              className="flex-1 flex items-center justify-center gap-1.5 px-2 sm:px-3 py-2 rounded-lg bg-blue-50 dark:bg-blue-500/10 text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-500/20 transition text-xs sm:text-sm font-medium whitespace-nowrap"
-            >
-              <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
-              </svg>
-              复用配置
-            </button>
-            <button
-              onClick={handleEdit}
-              disabled={!outputLen}
-              className="flex-1 flex items-center justify-center gap-1.5 px-2 sm:px-3 py-2 rounded-lg bg-green-50 dark:bg-green-500/10 text-green-600 dark:text-green-400 hover:bg-green-100 dark:hover:bg-green-500/20 disabled:opacity-40 disabled:cursor-not-allowed transition text-xs sm:text-sm font-medium whitespace-nowrap"
-            >
-              <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-              </svg>
-              编辑输出
-            </button>
-            <button
-              onClick={handleDelete}
-              className="flex-1 flex items-center justify-center gap-1.5 px-2 sm:px-3 py-2 rounded-lg bg-red-50 dark:bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-500/20 transition text-xs sm:text-sm font-medium whitespace-nowrap"
-            >
-              <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-              </svg>
-              删除记录
-            </button>
+            {inRecycleBin ? (
+              <button
+                onClick={handleRestore}
+                className="flex-1 flex items-center justify-center gap-1.5 px-2 sm:px-3 py-2 rounded-lg bg-blue-50 dark:bg-blue-500/10 text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-500/20 transition text-xs sm:text-sm font-medium whitespace-nowrap"
+              >
+                <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 12a8 8 0 018-8h5m0 0v5m0-5l-6 6m-7 2a8 8 0 008 8h5" />
+                </svg>
+                恢复记录
+              </button>
+            ) : (
+              <>
+                <button
+                  onClick={handleReuse}
+                  className="flex-1 flex items-center justify-center gap-1.5 px-2 sm:px-3 py-2 rounded-lg bg-blue-50 dark:bg-blue-500/10 text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-500/20 transition text-xs sm:text-sm font-medium whitespace-nowrap"
+                >
+                  <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6" />
+                  </svg>
+                  复用配置
+                </button>
+                <button
+                  onClick={handleEdit}
+                  disabled={!outputLen}
+                  className="flex-1 flex items-center justify-center gap-1.5 px-2 sm:px-3 py-2 rounded-lg bg-green-50 dark:bg-green-500/10 text-green-600 dark:text-green-400 hover:bg-green-100 dark:hover:bg-green-500/20 disabled:opacity-40 disabled:cursor-not-allowed transition text-xs sm:text-sm font-medium whitespace-nowrap"
+                >
+                  <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                  </svg>
+                  编辑输出
+                </button>
+                <button
+                  onClick={handleDelete}
+                  className="flex-1 flex items-center justify-center gap-1.5 px-2 sm:px-3 py-2 rounded-lg bg-red-50 dark:bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-500/20 transition text-xs sm:text-sm font-medium whitespace-nowrap"
+                >
+                  <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                  移入回收站
+                </button>
+              </>
+            )}
           </div>
         </div>
       </div>

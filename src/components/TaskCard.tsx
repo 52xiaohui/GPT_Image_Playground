@@ -1,27 +1,40 @@
-import { useEffect, useState } from 'react'
+import { memo, useEffect, useState } from 'react'
 import type { TaskRecord } from '../types'
-import { useStore, getCachedImage, ensureImageCached } from '../store'
+import { getCachedImage, ensureImageCached } from '../store'
 import { formatImageRatio } from '../lib/size'
 
 interface Props {
   task: TaskRecord
+  providerName: string
+  isInRecycleBin: boolean
+  selected: boolean
   onReuse: () => void
   onEditOutputs: () => void
   onDelete: () => void
+  onRestore: () => void
   onClick: () => void
+  onToggleSelect: () => void
 }
 
-export default function TaskCard({
+const imageMetaCache = new Map<string, { ratio: string; size: string }>()
+
+function TaskCard({
   task,
+  providerName,
+  isInRecycleBin,
+  selected,
   onReuse,
   onEditOutputs,
   onDelete,
+  onRestore,
   onClick,
+  onToggleSelect,
 }: Props) {
   const [thumbSrc, setThumbSrc] = useState<string>('')
   const [coverRatio, setCoverRatio] = useState<string>('')
   const [coverSize, setCoverSize] = useState<string>('')
   const [now, setNow] = useState(Date.now())
+  const coverImageId = task.outputImages?.[0] || ''
 
   // 定时更新运行中任务的计时
   useEffect(() => {
@@ -34,40 +47,58 @@ export default function TaskCard({
   useEffect(() => {
     setCoverRatio('')
     setCoverSize('')
+    setThumbSrc('')
 
-    if (task.outputImages?.[0]) {
-      const cached = getCachedImage(task.outputImages[0])
+    if (coverImageId) {
+      const cached = getCachedImage(coverImageId)
       if (cached) {
         setThumbSrc(cached)
       } else {
-        ensureImageCached(task.outputImages[0]).then((url) => {
+        ensureImageCached(coverImageId).then((url) => {
           if (url) setThumbSrc(url)
         })
       }
     }
-  }, [task.outputImages])
+  }, [coverImageId])
 
   useEffect(() => {
-    if (!thumbSrc) return
+    if (!thumbSrc || !coverImageId) return
+
+    const cachedMeta = imageMetaCache.get(coverImageId)
+    if (cachedMeta) {
+      setCoverRatio(cachedMeta.ratio)
+      setCoverSize(cachedMeta.size)
+      return
+    }
 
     let cancelled = false
     const image = new Image()
     image.onload = () => {
       if (!cancelled && image.naturalWidth > 0 && image.naturalHeight > 0) {
-        setCoverRatio(formatImageRatio(image.naturalWidth, image.naturalHeight))
-        setCoverSize(`${image.naturalWidth}×${image.naturalHeight}`)
+        const nextMeta = {
+          ratio: formatImageRatio(image.naturalWidth, image.naturalHeight),
+          size: `${image.naturalWidth}×${image.naturalHeight}`,
+        }
+        imageMetaCache.set(coverImageId, nextMeta)
+        setCoverRatio(nextMeta.ratio)
+        setCoverSize(nextMeta.size)
       }
     }
     image.src = thumbSrc
     if (image.complete && image.naturalWidth > 0 && image.naturalHeight > 0) {
-      setCoverRatio(formatImageRatio(image.naturalWidth, image.naturalHeight))
-      setCoverSize(`${image.naturalWidth}×${image.naturalHeight}`)
+      const nextMeta = {
+        ratio: formatImageRatio(image.naturalWidth, image.naturalHeight),
+        size: `${image.naturalWidth}×${image.naturalHeight}`,
+      }
+      imageMetaCache.set(coverImageId, nextMeta)
+      setCoverRatio(nextMeta.ratio)
+      setCoverSize(nextMeta.size)
     }
 
     return () => {
       cancelled = true
     }
-  }, [thumbSrc])
+  }, [coverImageId, thumbSrc])
 
   const duration = (() => {
     let seconds: number
@@ -86,15 +117,35 @@ export default function TaskCard({
   return (
     <div
       className={`bg-white dark:bg-gray-900 rounded-xl border overflow-hidden cursor-pointer transition-all hover:-translate-y-0.5 hover:shadow-lg ${
-        task.status === 'running'
-          ? 'border-blue-400 generating'
-          : 'border-gray-200 dark:border-white/[0.08]'
+        selected
+          ? 'border-blue-500 ring-2 ring-blue-100 dark:ring-blue-500/20'
+          : task.status === 'running'
+            ? 'border-blue-400 generating'
+            : 'border-gray-200 dark:border-white/[0.08]'
       }`}
       onClick={onClick}
     >
       <div className="flex h-40">
         {/* 左侧图片区域 */}
         <div className="w-40 min-w-[10rem] h-full bg-gray-100 dark:bg-black/20 relative flex items-center justify-center overflow-hidden flex-shrink-0">
+          <button
+            type="button"
+            className={`absolute top-1.5 right-1.5 z-10 flex h-6 w-6 items-center justify-center rounded-md border backdrop-blur-sm transition ${
+              selected
+                ? 'border-blue-500 bg-blue-500 text-white shadow-sm'
+                : 'border-white/60 bg-white/80 text-transparent hover:text-gray-400 dark:border-white/10 dark:bg-black/40 dark:hover:text-gray-200'
+            }`}
+            onClick={(e) => {
+              e.stopPropagation()
+              onToggleSelect()
+            }}
+            title={selected ? '取消选择' : '选择任务'}
+            aria-label={selected ? '取消选择' : '选择任务'}
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
+            </svg>
+          </button>
           {task.status === 'running' && (
             <div className="flex flex-col items-center gap-2">
               <svg
@@ -201,6 +252,17 @@ export default function TaskCard({
           <div className="mt-auto flex flex-col gap-1.5">
             {/* 参数：横向滚动 */}
             <div className="flex overflow-x-auto hide-scrollbar gap-1.5 whitespace-nowrap mask-edge-r min-w-0 pr-2">
+              {isInRecycleBin && (
+                <span className="text-xs px-1.5 py-0.5 rounded bg-amber-50 text-amber-600 dark:bg-amber-500/10 dark:text-amber-300 flex-shrink-0">
+                  回收站
+                </span>
+              )}
+              <span
+                className="max-w-[9rem] truncate text-xs px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 dark:bg-blue-500/10 dark:text-blue-300 flex-shrink-0"
+                title={providerName}
+              >
+                {providerName}
+              </span>
               <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100 dark:bg-white/[0.04] text-gray-500 dark:text-gray-400 flex-shrink-0">
                 {task.params.quality}
               </span>
@@ -216,64 +278,88 @@ export default function TaskCard({
               className="flex gap-1 justify-end flex-shrink-0"
               onClick={(e) => e.stopPropagation()}
             >
-              <button
-                onClick={onReuse}
-                className="p-1.5 rounded-md hover:bg-blue-50 dark:hover:bg-blue-950/30 text-gray-400 hover:text-blue-500 transition"
-                title="复用配置"
-              >
-                <svg
-                  className="w-4 h-4"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
+              {isInRecycleBin ? (
+                <button
+                  onClick={onRestore}
+                  className="p-1.5 rounded-md hover:bg-blue-50 dark:hover:bg-blue-950/30 text-gray-400 hover:text-blue-500 transition"
+                  title="恢复记录"
                 >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"
-                  />
-                </svg>
-              </button>
-              <button
-                onClick={onEditOutputs}
-                className="p-1.5 rounded-md hover:bg-green-50 dark:hover:bg-green-950/30 text-gray-400 hover:text-green-500 transition disabled:opacity-30"
-                title="编辑输出"
-                disabled={!task.outputImages?.length}
-              >
-                <svg
-                  className="w-4 h-4"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
-                  />
-                </svg>
-              </button>
-              <button
-                onClick={onDelete}
-                className="p-1.5 rounded-md hover:bg-red-50 dark:hover:bg-red-950/30 text-gray-400 hover:text-red-500 transition"
-                title="删除记录"
-              >
-                <svg
-                  className="w-4 h-4"
-                  fill="none"
-                  stroke="currentColor"
-                  viewBox="0 0 24 24"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                  />
-                </svg>
-              </button>
+                  <svg
+                    className="w-4 h-4"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M4 12a8 8 0 018-8h5m0 0v5m0-5l-6 6m-7 2a8 8 0 008 8h5"
+                    />
+                  </svg>
+                </button>
+              ) : (
+                <>
+                  <button
+                    onClick={onReuse}
+                    className="p-1.5 rounded-md hover:bg-blue-50 dark:hover:bg-blue-950/30 text-gray-400 hover:text-blue-500 transition"
+                    title="复用配置"
+                  >
+                    <svg
+                      className="w-4 h-4"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"
+                      />
+                    </svg>
+                  </button>
+                  <button
+                    onClick={onEditOutputs}
+                    className="p-1.5 rounded-md hover:bg-green-50 dark:hover:bg-green-950/30 text-gray-400 hover:text-green-500 transition disabled:opacity-30"
+                    title="编辑输出"
+                    disabled={!task.outputImages?.length}
+                  >
+                    <svg
+                      className="w-4 h-4"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
+                      />
+                    </svg>
+                  </button>
+                  <button
+                    onClick={onDelete}
+                    className="p-1.5 rounded-md hover:bg-red-50 dark:hover:bg-red-950/30 text-gray-400 hover:text-red-500 transition"
+                    title="移入回收站"
+                  >
+                    <svg
+                      className="w-4 h-4"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                      />
+                    </svg>
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -281,3 +367,12 @@ export default function TaskCard({
     </div>
   )
 }
+
+export default memo(TaskCard, (prevProps, nextProps) => {
+  return (
+    prevProps.task === nextProps.task &&
+    prevProps.providerName === nextProps.providerName &&
+    prevProps.isInRecycleBin === nextProps.isInRecycleBin &&
+    prevProps.selected === nextProps.selected
+  )
+})

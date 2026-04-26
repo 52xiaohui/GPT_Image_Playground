@@ -6,6 +6,21 @@ export interface DevProxyConfig {
   secure: boolean
 }
 
+function trimTrailingSlashes(value: string): string {
+  return value.replace(/\/+$/, '')
+}
+
+function normalizePathname(pathname: string): string {
+  const trimmed = trimTrailingSlashes(pathname)
+  return trimmed === '/' ? '' : trimmed
+}
+
+function joinUrlPath(base: string, path: string): string {
+  const trimmedBase = trimTrailingSlashes(base)
+  const trimmedPath = path.replace(/^\/+/, '')
+  return trimmedBase ? `${trimmedBase}/${trimmedPath}` : `/${trimmedPath}`
+}
+
 export function normalizeBaseUrl(baseUrl: string): string {
   const trimmed = baseUrl.trim()
   if (!trimmed) return ''
@@ -16,10 +31,42 @@ export function normalizeBaseUrl(baseUrl: string): string {
 
   try {
     const url = new URL(input)
-    return `${url.protocol}//${url.host}`
+    return `${url.protocol}//${url.host}${normalizePathname(url.pathname)}`
   } catch {
-    return trimmed.replace(/\/+$/, '')
+    return trimTrailingSlashes(trimmed)
   }
+}
+
+export function normalizeApiBaseUrl(baseUrl: string): string {
+  const normalizedBaseUrl = normalizeBaseUrl(baseUrl)
+  if (!normalizedBaseUrl) return ''
+
+  if (/^[a-zA-Z][a-zA-Z\d+.-]*:\/\//.test(normalizedBaseUrl)) {
+    const url = new URL(normalizedBaseUrl)
+    const pathname = normalizePathname(url.pathname)
+    const apiPath = /(?:^|\/)v1$/i.test(pathname) ? pathname || '/v1' : `${pathname}/v1`
+    return `${url.protocol}//${url.host}${apiPath}`
+  }
+
+  const pathname = normalizedBaseUrl.startsWith('/') ? normalizedBaseUrl : `/${normalizedBaseUrl}`
+  return /(?:^|\/)v1$/i.test(pathname) ? pathname : `${pathname}/v1`
+}
+
+export function normalizeProxyTargetBaseUrl(baseUrl: string): string {
+  const normalizedBaseUrl = normalizeBaseUrl(baseUrl)
+  if (!normalizedBaseUrl) return ''
+
+  if (/^[a-zA-Z][a-zA-Z\d+.-]*:\/\//.test(normalizedBaseUrl)) {
+    const url = new URL(normalizedBaseUrl)
+    const pathname = normalizePathname(url.pathname).replace(/(?:^|\/)v1$/i, '')
+    return `${url.protocol}//${url.host}${normalizePathname(pathname)}`
+  }
+
+  const pathname = (normalizedBaseUrl.startsWith('/') ? normalizedBaseUrl : `/${normalizedBaseUrl}`).replace(
+    /(?:^|\/)v1$/i,
+    '',
+  )
+  return normalizePathname(pathname)
 }
 
 export function normalizeDevProxyConfig(input: unknown): DevProxyConfig | null {
@@ -42,19 +89,25 @@ export function normalizeDevProxyConfig(input: unknown): DevProxyConfig | null {
   }
 }
 
-export function buildApiUrl(baseUrl: string, path: string, proxyConfig?: DevProxyConfig | null): string {
-  const normalizedBaseUrl = normalizeBaseUrl(baseUrl)
-  const apiPath = ['v1', path.replace(/^\/+/, '')].join('/')
+export function buildApiUrl(
+  baseUrl: string,
+  path: string,
+  proxyConfig?: DevProxyConfig | null,
+  options?: { forceProxy?: boolean },
+): string {
+  const normalizedApiBaseUrl = normalizeApiBaseUrl(baseUrl)
+  const proxyTargetApiBaseUrl = normalizeApiBaseUrl(proxyConfig?.target ?? '')
+  const apiPath = joinUrlPath('/v1', path)
+  const forceProxy = options?.forceProxy === true
   const useProxy =
     Boolean(proxyConfig?.enabled) &&
-    Boolean(proxyConfig?.target) &&
-    normalizedBaseUrl === proxyConfig?.target
+    (forceProxy || (Boolean(proxyConfig?.target) && normalizedApiBaseUrl === proxyTargetApiBaseUrl))
 
   if (useProxy) {
-    return `${proxyConfig!.prefix}/${apiPath}`
+    return joinUrlPath(proxyConfig!.prefix, apiPath)
   }
 
-  return normalizedBaseUrl ? `${normalizedBaseUrl}/${apiPath}` : `/${apiPath}`
+  return normalizedApiBaseUrl ? joinUrlPath(normalizedApiBaseUrl, path) : apiPath
 }
 
 export function resolveDevProxyConfig(input: unknown, isDev: boolean): DevProxyConfig | null {
