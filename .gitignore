@@ -2,3 +2,5 @@ node_modules/
 dist/
 dev-proxy.config.json
 .ace-tool/
+.env.local
+.env.local.bak
