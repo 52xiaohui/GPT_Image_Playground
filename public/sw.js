@@ -1,54 +1,75 @@
-const CACHE_NAME = 'gpt-image-playground-v0.1.5'
+const CACHE_NAME = 'gpt-image-playground-v0.1.6'
+const APP_CACHE_PREFIX = 'gpt-image-playground'
 const APP_SHELL = ['./', './index.html', './manifest.webmanifest', './pwa-icon.svg']
+const DEV_HOSTNAMES = new Set(['localhost', '127.0.0.1'])
+const isDevHost = DEV_HOSTNAMES.has(self.location.hostname)
+
+async function clearAppCaches() {
+  const keys = await caches.keys()
+  await Promise.all(
+    keys
+      .filter((key) => key.startsWith(APP_CACHE_PREFIX))
+      .map((key) => caches.delete(key)),
+  )
+}
+
+async function networkFirst(request, isNavigation) {
+  try {
+    const response = await fetch(request)
+    if (response.ok) {
+      const cache = await caches.open(CACHE_NAME)
+      const cacheKey = isNavigation ? './index.html' : request
+      await cache.put(cacheKey, response.clone())
+    }
+    return response
+  } catch (error) {
+    const cached = await caches.match(isNavigation ? './index.html' : request)
+    if (cached) {
+      return cached
+    }
+    throw error
+  }
+}
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)),
-  )
+  if (isDevHost) {
+    event.waitUntil(clearAppCaches())
+    self.skipWaiting()
+    return
+  }
+
+  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(APP_SHELL)))
   self.skipWaiting()
 })
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(keys.filter((key) => key !== CACHE_NAME).map((key) => caches.delete(key))),
-    ),
+    (async () => {
+      if (isDevHost) {
+        await clearAppCaches()
+        await self.registration.unregister()
+        return
+      }
+
+      const keys = await caches.keys()
+      await Promise.all(
+        keys
+          .filter((key) => key !== CACHE_NAME && key.startsWith(APP_CACHE_PREFIX))
+          .map((key) => caches.delete(key)),
+      )
+      await self.clients.claim()
+    })(),
   )
-  self.clients.claim()
 })
 
 self.addEventListener('fetch', (event) => {
-  const { request } = event
+  if (isDevHost) return
 
+  const { request } = event
   if (request.method !== 'GET') return
 
   const url = new URL(request.url)
   if (url.origin !== self.location.origin) return
 
-  if (request.mode === 'navigate') {
-    event.respondWith(
-      fetch(request)
-        .then((response) => {
-          const copy = response.clone()
-          caches.open(CACHE_NAME).then((cache) => cache.put('./index.html', copy))
-          return response
-        })
-        .catch(() => caches.match('./index.html')),
-    )
-    return
-  }
-
-  event.respondWith(
-    caches.match(request).then((cached) => {
-      if (cached) return cached
-
-      return fetch(request).then((response) => {
-        if (response.ok) {
-          const copy = response.clone()
-          caches.open(CACHE_NAME).then((cache) => cache.put(request, copy))
-        }
-        return response
-      })
-    }),
-  )
+  event.respondWith(networkFirst(request, request.mode === 'navigate'))
 })

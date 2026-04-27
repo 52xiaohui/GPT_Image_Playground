@@ -158,6 +158,125 @@ async function shrinkDataUrlForResponses(
   return bestDataUrl
 }
 
+async function shrinkImageAndMaskForResponses(
+  imageDataUrl: string,
+  maskDataUrl: string,
+  targetTotalBytes = RESPONSES_INLINE_IMAGE_TOTAL_TARGET_BYTES,
+): Promise<{ imageDataUrl: string; maskDataUrl: string }> {
+  const originalImageBytes = getDataUrlByteSize(imageDataUrl)
+  const originalMaskBytes = getDataUrlByteSize(maskDataUrl)
+  const sourceImage = await loadImageElement(imageDataUrl)
+  const maskImage = await loadImageElement(maskDataUrl)
+  const largestSide = Math.max(
+    sourceImage.naturalWidth || sourceImage.width,
+    sourceImage.naturalHeight || sourceImage.height,
+  )
+
+  if (
+    originalImageBytes + originalMaskBytes <= targetTotalBytes &&
+    largestSide <= RESPONSES_INLINE_IMAGE_MAX_DIMENSION
+  ) {
+    return { imageDataUrl, maskDataUrl }
+  }
+
+  let scale = Math.min(1, RESPONSES_INLINE_IMAGE_MAX_DIMENSION / Math.max(largestSide, 1))
+  let quality = 0.82
+  let bestImageDataUrl = imageDataUrl
+  let bestMaskDataUrl = maskDataUrl
+  let bestTotalBytes = originalImageBytes + originalMaskBytes
+
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const width = Math.max(1, Math.round((sourceImage.naturalWidth || sourceImage.width) * scale))
+    const height = Math.max(1, Math.round((sourceImage.naturalHeight || sourceImage.height) * scale))
+
+    const imageCanvas = document.createElement('canvas')
+    imageCanvas.width = width
+    imageCanvas.height = height
+    const imageContext = imageCanvas.getContext('2d')
+    if (!imageContext) {
+      return { imageDataUrl, maskDataUrl }
+    }
+    imageContext.drawImage(sourceImage, 0, 0, width, height)
+
+    const maskCanvas = document.createElement('canvas')
+    maskCanvas.width = width
+    maskCanvas.height = height
+    const maskContext = maskCanvas.getContext('2d')
+    if (!maskContext) {
+      return { imageDataUrl, maskDataUrl }
+    }
+    maskContext.imageSmoothingEnabled = false
+    maskContext.clearRect(0, 0, width, height)
+    maskContext.drawImage(maskImage, 0, 0, width, height)
+
+    const nextImageDataUrl = await blobToDataUrl(
+      await canvasToBlob(imageCanvas, 'image/webp', quality),
+      'image/webp',
+    )
+    const nextMaskDataUrl = await blobToDataUrl(
+      await canvasToBlob(maskCanvas, 'image/png'),
+      'image/png',
+    )
+    const nextTotalBytes =
+      getDataUrlByteSize(nextImageDataUrl) + getDataUrlByteSize(nextMaskDataUrl)
+
+    if (nextTotalBytes < bestTotalBytes) {
+      bestImageDataUrl = nextImageDataUrl
+      bestMaskDataUrl = nextMaskDataUrl
+      bestTotalBytes = nextTotalBytes
+    }
+
+    if (nextTotalBytes <= targetTotalBytes) {
+      return {
+        imageDataUrl: nextImageDataUrl,
+        maskDataUrl: nextMaskDataUrl,
+      }
+    }
+
+    const currentLargestSide = Math.max(width, height)
+    if (
+      currentLargestSide <= RESPONSES_INLINE_IMAGE_MIN_DIMENSION &&
+      quality <= RESPONSES_INLINE_IMAGE_MIN_QUALITY
+    ) {
+      break
+    }
+
+    scale *= 0.82
+    quality = Math.max(RESPONSES_INLINE_IMAGE_MIN_QUALITY, quality - 0.08)
+  }
+
+  return {
+    imageDataUrl: bestImageDataUrl,
+    maskDataUrl: bestMaskDataUrl,
+  }
+}
+
+async function normalizeEditMaskForProvider(
+  maskDataUrl: string,
+): Promise<string> {
+  const maskImage = await loadImageElement(maskDataUrl)
+  const width = Math.max(1, maskImage.naturalWidth || maskImage.width)
+  const height = Math.max(1, maskImage.naturalHeight || maskImage.height)
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+
+  const context = canvas.getContext('2d')
+  if (!context) {
+    return maskDataUrl
+  }
+
+  // 当前编辑器里存的是“透明底 + 选区实心”蒙版。
+  // OpenAI 官方语义要求“透明区域 = 要编辑的区域”，因此这里反转 alpha。
+  context.fillStyle = '#ffffff'
+  context.fillRect(0, 0, width, height)
+  context.globalCompositeOperation = 'destination-out'
+  context.drawImage(maskImage, 0, 0, width, height)
+  context.globalCompositeOperation = 'source-over'
+
+  return canvas.toDataURL('image/png')
+}
+
 function getFileExtensionFromMime(mimeType: string): string {
   const subtype = mimeType.split('/')[1]?.toLowerCase()
   if (!subtype) return 'png'
@@ -173,6 +292,8 @@ export interface CallApiOptions {
   inputImageDataUrls: string[]
   /** 局部编辑蒙版 data URL。存在时会按蒙版编辑模式组包 */
   editMaskDataUrl?: string
+  /** 局部编辑时，蒙版对应源图在输入数组中的索引 */
+  editSourceImageIndex?: number
 }
 
 export interface CallApiResult {
@@ -513,6 +634,35 @@ function shouldFallbackResponsesStreamToJson(
   return !/(?:auth_not_found|no auth available|invalid api key|insufficient|quota)/i.test(error.message)
 }
 
+function isPayloadTooLargeError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+
+  const status = (error as ApiError).status
+  if (status === 413) {
+    return true
+  }
+
+  return /(?:payload too large|request entity too large|content too large|body too large|http 413)/i.test(
+    error.message,
+  )
+}
+
+function shouldRetryResponsesWithFileId(
+  error: unknown,
+  imageInputMode: ResponsesImageInputMode,
+  opts: CallApiOptions,
+): boolean {
+  if (imageInputMode !== 'auto') {
+    return false
+  }
+
+  if (!isPayloadTooLargeError(error)) {
+    return false
+  }
+
+  return opts.inputImageDataUrls.some((value) => isDataUrl(value)) || Boolean(opts.editMaskDataUrl)
+}
+
 async function readResponsesPayload(response: Response): Promise<unknown> {
   const text = await response.text()
   const directJson = tryParseJson(text)
@@ -826,6 +976,46 @@ async function prepareResponsesEditMask(
   }
 }
 
+async function prepareResponsesInlineEditAssets(
+  opts: CallApiOptions,
+  imageInputMode: ResponsesImageInputMode,
+): Promise<{
+  inputImageDataUrls: string[]
+  editMaskDataUrl: string | undefined
+  preserveOriginalIndices?: Set<number>
+}> {
+  if (!opts.editMaskDataUrl || imageInputMode === 'file_id') {
+    return {
+      inputImageDataUrls: opts.inputImageDataUrls,
+      editMaskDataUrl: opts.editMaskDataUrl,
+      preserveOriginalIndices:
+        opts.editMaskDataUrl && opts.editSourceImageIndex != null
+          ? new Set([opts.editSourceImageIndex])
+          : undefined,
+    }
+  }
+
+  const sourceIndex = opts.editSourceImageIndex ?? 0
+  const sourceImage = opts.inputImageDataUrls[sourceIndex]
+  if (!sourceImage || !isDataUrl(sourceImage)) {
+    return {
+      inputImageDataUrls: opts.inputImageDataUrls,
+      editMaskDataUrl: opts.editMaskDataUrl,
+      preserveOriginalIndices: new Set([sourceIndex]),
+    }
+  }
+
+  const resized = await shrinkImageAndMaskForResponses(sourceImage, opts.editMaskDataUrl)
+  const inputImageDataUrls = [...opts.inputImageDataUrls]
+  inputImageDataUrls[sourceIndex] = resized.imageDataUrl
+
+  return {
+    inputImageDataUrls,
+    editMaskDataUrl: resized.maskDataUrl,
+    preserveOriginalIndices: new Set([sourceIndex]),
+  }
+}
+
 function buildResponsesInput(prompt: string, inputImages: ResponsesInputImage[]) {
   const content: ResponsesInputContent[] = []
 
@@ -994,19 +1184,48 @@ async function callResponsesApi(
   opts: CallApiOptions,
   ctx: SharedRequestContext,
 ): Promise<CallApiResult> {
+  const responsesImageInputMode = getResponsesImageInputMode(opts.settings)
+
+  try {
+    return await callResponsesApiWithInputMode(opts, ctx, responsesImageInputMode)
+  } catch (error) {
+    if (!shouldRetryResponsesWithFileId(error, responsesImageInputMode, opts)) {
+      throw error
+    }
+
+    try {
+      return await callResponsesApiWithInputMode(opts, ctx, 'file_id')
+    } catch (fallbackError) {
+      if (fallbackError instanceof Error && /Responses .*file_id 上传/.test(fallbackError.message)) {
+        throw createApiError(
+          '当前供应商的 /v1/responses 会因原图和蒙版内联导致请求体过大，同时也不支持 /v1/files 上传。请改用更小图片，或更换为支持 file_id / images/edits 的供应商。',
+          (error as ApiError | undefined)?.status ?? (fallbackError as ApiError | undefined)?.status,
+        )
+      }
+
+      throw fallbackError
+    }
+  }
+}
+
+async function callResponsesApiWithInputMode(
+  opts: CallApiOptions,
+  ctx: SharedRequestContext,
+  responsesImageInputMode: ResponsesImageInputMode,
+): Promise<CallApiResult> {
   const requestCount = Math.max(1, opts.params.n || 1)
   const images: string[] = []
-  const responsesImageInputMode = getResponsesImageInputMode(opts.settings)
+  const preparedEditAssets = await prepareResponsesInlineEditAssets(opts, responsesImageInputMode)
   const { inputImages, uploadedFileIds } = await prepareResponsesInputImages(
     opts.settings.baseUrl,
-    opts.inputImageDataUrls,
+    preparedEditAssets.inputImageDataUrls,
     responsesImageInputMode,
     ctx,
-    opts.editMaskDataUrl ? { preserveOriginalIndices: new Set([0]) } : undefined,
+    preparedEditAssets.preserveOriginalIndices
   )
   const { editMask, uploadedFileIds: uploadedMaskFileIds } = await prepareResponsesEditMask(
     opts.settings.baseUrl,
-    opts.editMaskDataUrl,
+    preparedEditAssets.editMaskDataUrl,
     responsesImageInputMode,
     ctx,
   )
@@ -1104,6 +1323,13 @@ export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult>
   const timeoutId = setTimeout(() => controller.abort(), settings.timeout * 1000)
 
   try {
+    const normalizedOpts =
+      opts.editMaskDataUrl != null
+        ? {
+            ...opts,
+            editMaskDataUrl: await normalizeEditMaskForProvider(opts.editMaskDataUrl),
+          }
+        : opts
     const ctx: SharedRequestContext = {
       controller,
       requestHeaders,
@@ -1114,22 +1340,22 @@ export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult>
     const apiProtocol = getApiProtocol(settings)
 
     if (apiProtocol === 'responses') {
-      return await callResponsesApi(opts, ctx)
+      return await callResponsesApi(normalizedOpts, ctx)
     }
 
     if (apiProtocol === 'images') {
-      return await callImagesApi(opts, ctx)
+      return await callImagesApi(normalizedOpts, ctx)
     }
 
     try {
-      return await callImagesApi(opts, ctx)
+      return await callImagesApi(normalizedOpts, ctx)
     } catch (error) {
       if (!shouldFallbackToResponses(error)) {
         throw error
       }
     }
 
-    return await callResponsesApi(opts, ctx)
+    return await callResponsesApi(normalizedOpts, ctx)
   } finally {
     clearTimeout(timeoutId)
   }

@@ -284,6 +284,226 @@ function normalizeProviderList(providers: unknown): ProviderConfig[] {
     .filter((provider): provider is ProviderConfig => provider !== null)
 }
 
+function getProviderNameKey(name: string): string {
+  return name.trim().toLocaleLowerCase()
+}
+
+function hasProviderName(providers: ProviderConfig[], name: string): boolean {
+  const nameKey = getProviderNameKey(name)
+  return providers.some((provider) => getProviderNameKey(provider.name) === nameKey)
+}
+
+function isSameProviderConfig(left: ProviderConfig, right: ProviderConfig): boolean {
+  const leftSettings = getProviderSettings(left)
+  const rightSettings = getProviderSettings(right)
+
+  return (
+    getProviderNameKey(left.name) === getProviderNameKey(right.name) &&
+    leftSettings.baseUrl === rightSettings.baseUrl &&
+    leftSettings.apiKey === rightSettings.apiKey &&
+    leftSettings.model === rightSettings.model &&
+    leftSettings.responsesImageModel === rightSettings.responsesImageModel &&
+    leftSettings.responsesTransport === rightSettings.responsesTransport &&
+    leftSettings.responsesImageInputMode === rightSettings.responsesImageInputMode &&
+    leftSettings.timeout === rightSettings.timeout &&
+    leftSettings.apiProtocol === rightSettings.apiProtocol &&
+    leftSettings.requestMode === rightSettings.requestMode
+  )
+}
+
+function getNextImportedProviderName(
+  providers: ProviderConfig[],
+  preferredName: string,
+): string {
+  const normalizedName = preferredName.trim() || '未命名供应商'
+  if (!hasProviderName(providers, normalizedName)) {
+    return normalizedName
+  }
+
+  const importedName = `${normalizedName} (导入)`
+  if (!hasProviderName(providers, importedName)) {
+    return importedName
+  }
+
+  let index = 2
+  while (hasProviderName(providers, `${normalizedName} (导入 ${index})`)) {
+    index += 1
+  }
+  return `${normalizedName} (导入 ${index})`
+}
+
+function getCategoryNameKey(name: string): string {
+  return normalizeCategoryName(name).toLocaleLowerCase()
+}
+
+function findCategoryByName(
+  categories: CategoryConfig[],
+  categoryName: string,
+): CategoryConfig | undefined {
+  const nameKey = getCategoryNameKey(categoryName)
+  if (!nameKey) return undefined
+  return categories.find((category) => getCategoryNameKey(category.name) === nameKey)
+}
+
+function mergeImportedProviders(
+  currentProviders: ProviderConfig[],
+  importedProviders: ProviderConfig[],
+): {
+  providers: ProviderConfig[]
+  providerIdMap: Map<string, string>
+  addedProviderCount: number
+} {
+  const mergedProviders = normalizeProviderList(currentProviders)
+  const providerIdMap = new Map<string, string>()
+  const baseCount = mergedProviders.length
+
+  for (const importedProvider of normalizeProviderList(importedProviders)) {
+    const providerWithSameId = mergedProviders.find((provider) => provider.id === importedProvider.id)
+    if (providerWithSameId) {
+      if (isSameProviderConfig(providerWithSameId, importedProvider)) {
+        providerIdMap.set(importedProvider.id, providerWithSameId.id)
+        continue
+      }
+
+      const providerWithSameConfig = mergedProviders.find((provider) =>
+        isSameProviderConfig(provider, importedProvider),
+      )
+      if (providerWithSameConfig) {
+        providerIdMap.set(importedProvider.id, providerWithSameConfig.id)
+        continue
+      }
+
+      const renamedProvider = createProviderConfig(
+        getProviderSettings(importedProvider),
+        getNextImportedProviderName(mergedProviders, importedProvider.name),
+      )
+      mergedProviders.push(renamedProvider)
+      providerIdMap.set(importedProvider.id, renamedProvider.id)
+      continue
+    }
+
+    const providerWithSameConfig = mergedProviders.find((provider) =>
+      isSameProviderConfig(provider, importedProvider),
+    )
+    if (providerWithSameConfig) {
+      providerIdMap.set(importedProvider.id, providerWithSameConfig.id)
+      continue
+    }
+
+    mergedProviders.push(importedProvider)
+    providerIdMap.set(importedProvider.id, importedProvider.id)
+  }
+
+  return {
+    providers: mergedProviders,
+    providerIdMap,
+    addedProviderCount: mergedProviders.length - baseCount,
+  }
+}
+
+function mergeImportedCategories(
+  currentCategories: CategoryConfig[],
+  importedCategories: CategoryConfig[],
+): {
+  categories: CategoryConfig[]
+  categoryIdMap: Map<string, string>
+  addedCategoryCount: number
+} {
+  const mergedCategories = normalizeCategoryList(currentCategories)
+  const categoryIdMap = new Map<string, string>()
+  const baseCount = mergedCategories.length
+
+  for (const importedCategory of normalizeCategoryList(importedCategories)) {
+    const categoryWithSameId = mergedCategories.find((category) => category.id === importedCategory.id)
+    const categoryWithSameName = findCategoryByName(mergedCategories, importedCategory.name)
+
+    if (categoryWithSameId && categoryWithSameId.name === importedCategory.name) {
+      categoryIdMap.set(importedCategory.id, categoryWithSameId.id)
+      continue
+    }
+
+    if (categoryWithSameName) {
+      categoryIdMap.set(importedCategory.id, categoryWithSameName.id)
+      continue
+    }
+
+    if (categoryWithSameId) {
+      const createdCategory = createCategoryConfig(importedCategory.name, undefined, importedCategory.createdAt)
+      mergedCategories.push(createdCategory)
+      categoryIdMap.set(importedCategory.id, createdCategory.id)
+      continue
+    }
+
+    mergedCategories.push(importedCategory)
+    categoryIdMap.set(importedCategory.id, importedCategory.id)
+  }
+
+  return {
+    categories: mergedCategories,
+    categoryIdMap,
+    addedCategoryCount: mergedCategories.length - baseCount,
+  }
+}
+
+function getImportedProvidersFromExport(
+  data: ExportData,
+  persistedStateSnapshot: PersistedAppStateSnapshot | null,
+): ProviderConfig[] {
+  const snapshotProviders = normalizeProviderList(persistedStateSnapshot?.providers)
+  if (snapshotProviders.length > 0) {
+    return snapshotProviders
+  }
+
+  const manifestProviders = normalizeProviderList(data.providers)
+  if (manifestProviders.length > 0) {
+    return manifestProviders
+  }
+
+  return data.settings ? [createProviderConfig(data.settings, DEFAULT_PROVIDER_NAME)] : []
+}
+
+function getImportedCategoriesFromExport(
+  data: ExportData,
+  persistedStateSnapshot: PersistedAppStateSnapshot | null,
+): CategoryConfig[] {
+  const snapshotCategories = normalizeCategoryList(persistedStateSnapshot?.categories)
+  if (snapshotCategories.length > 0) {
+    return snapshotCategories
+  }
+
+  return normalizeCategoryList(data.categories)
+}
+
+function remapImportedTaskRelations(
+  task: TaskRecord,
+  mergedProviders: ProviderConfig[],
+  providerIdMap: Map<string, string>,
+  mergedCategories: CategoryConfig[],
+  categoryIdMap: Map<string, string>,
+): TaskRecord {
+  const nextProviderId =
+    task.providerId && providerIdMap.has(task.providerId)
+      ? (providerIdMap.get(task.providerId) ?? task.providerId)
+      : task.providerId ?? null
+  const mappedProvider = findProviderById(mergedProviders, nextProviderId)
+
+  const mappedCategoryId =
+    task.categoryId && categoryIdMap.has(task.categoryId)
+      ? (categoryIdMap.get(task.categoryId) ?? task.categoryId)
+      : task.categoryId ?? null
+  const mappedCategory =
+    findCategoryById(mergedCategories, mappedCategoryId) ??
+    findCategoryByName(mergedCategories, task.categoryName ?? '')
+
+  return {
+    ...task,
+    providerId: nextProviderId,
+    providerName: mappedProvider?.name ?? task.providerName ?? null,
+    categoryId: mappedCategory?.id ?? mappedCategoryId,
+    categoryName: mappedCategory?.name ?? task.categoryName ?? null,
+  }
+}
+
 // ===== Store 类型 =====
 
 interface AppState {
@@ -754,9 +974,13 @@ async function executeTask(taskId: string, requestSettings?: AppSettings) {
   try {
     // 获取输入图片地址（data URL 或公网 URL）
     const inputDataUrls: string[] = []
+    const loadedInputIds: string[] = []
     for (const imgId of task.inputImageIds) {
       const dataUrl = await ensureImageCached(imgId)
-      if (dataUrl) inputDataUrls.push(dataUrl)
+      if (dataUrl) {
+        inputDataUrls.push(dataUrl)
+        loadedInputIds.push(imgId)
+      }
     }
     const editMaskDataUrl = task.editMaskImageId
       ? await ensureImageCached(task.editMaskImageId)
@@ -764,6 +988,8 @@ async function executeTask(taskId: string, requestSettings?: AppSettings) {
     if (task.editMaskImageId && !editMaskDataUrl) {
       throw new Error('局部编辑蒙版缺失，请重新选择编辑区域后再试')
     }
+    const editSourceImageIndex =
+      task.editSourceImageId != null ? loadedInputIds.indexOf(task.editSourceImageId) : -1
 
     const result = await callImageApi({
       settings: providerSettings,
@@ -771,6 +997,7 @@ async function executeTask(taskId: string, requestSettings?: AppSettings) {
       params: task.params,
       inputImageDataUrls: inputDataUrls,
       editMaskDataUrl,
+      editSourceImageIndex: editSourceImageIndex >= 0 ? editSourceImageIndex : undefined,
     })
 
     // 存储输出图片
@@ -1561,10 +1788,48 @@ export async function importData(file: File) {
     if (!manifestBytes) throw new Error('ZIP 中缺少 manifest.json')
 
     const data: ExportData = JSON.parse(strFromU8(manifestBytes))
-    if (!data.tasks || !data.imageFiles) throw new Error('无效的数据格式')
+    if (!Array.isArray(data.tasks) || !data.imageFiles || typeof data.imageFiles !== 'object') {
+      throw new Error('无效的数据格式')
+    }
+
+    const persistedStateSnapshot = readPersistedAppStateSnapshot(data.persistedState)
+    const currentState = useStore.getState()
+    const existingTasks = await getAllTasks()
+    const existingTaskIds = new Set(existingTasks.map((task) => task.id))
+    const importedProviders = getImportedProvidersFromExport(data, persistedStateSnapshot)
+    const importedCategories = getImportedCategoriesFromExport(data, persistedStateSnapshot)
+    const { providers: mergedProviders, providerIdMap, addedProviderCount } = mergeImportedProviders(
+      currentState.providers,
+      importedProviders,
+    )
+    const { categories: mergedCategories, categoryIdMap, addedCategoryCount } = mergeImportedCategories(
+      currentState.categories,
+      importedCategories,
+    )
+    const tasksToImport = data.tasks
+      .filter((task) => !existingTaskIds.has(task.id))
+      .map((task) =>
+        remapImportedTaskRelations(
+          task,
+          mergedProviders,
+          providerIdMap,
+          mergedCategories,
+          categoryIdMap,
+        ),
+      )
+    const skippedTaskCount = data.tasks.length - tasksToImport.length
+    const referencedImageIds = new Set<string>()
+
+    for (const task of tasksToImport) {
+      for (const id of getTaskReferencedImageIds(task)) {
+        referencedImageIds.add(id)
+      }
+    }
 
     // 还原图片
     for (const [id, info] of Object.entries(data.imageFiles)) {
+      if (!referencedImageIds.has(id)) continue
+
       if (info.url) {
         await putImage({ id, dataUrl: info.url, createdAt: info.createdAt, source: info.source })
         imageCache.set(id, info.url)
@@ -1579,36 +1844,31 @@ export async function importData(file: File) {
       imageCache.set(id, dataUrl)
     }
 
-    for (const task of data.tasks) {
+    for (const task of tasksToImport) {
       await putTask(task)
     }
 
-    const persistedStateSnapshot = readPersistedAppStateSnapshot(data.persistedState)
-    if (persistedStateSnapshot) {
-      applyPersistedAppStateSnapshot(persistedStateSnapshot)
-    } else {
-      if (Array.isArray(data.providers) && data.providers.length > 0) {
-        useStore.getState().replaceProviderState(data.providers, data.activeProviderId)
-      } else if (data.settings) {
-        useStore.getState().replaceProviderState(
-          [createProviderConfig(data.settings, DEFAULT_PROVIDER_NAME)],
-          undefined,
-        )
-      }
-      useStore
-        .getState()
-        .replaceCategoryState(data.categories ?? [], data.activeCategoryFilter)
-      if (data.params) {
-        useStore.getState().setParams(data.params)
-      }
-    }
+    useStore.getState().replaceProviderState(mergedProviders, currentState.activeProviderId)
+    useStore
+      .getState()
+      .replaceCategoryState(mergedCategories, currentState.activeCategoryFilter)
 
     const tasks = await getAllTasks()
     useStore.getState().setTasks(tasks)
     repairCategoryStateFromTasks(tasks)
+    const summaryParts = [`已导入 ${tasksToImport.length} 条记录`]
+    if (skippedTaskCount > 0) {
+      summaryParts.push(`跳过 ${skippedTaskCount} 条重复记录`)
+    }
+    if (addedProviderCount > 0) {
+      summaryParts.push(`新增 ${addedProviderCount} 个供应商`)
+    }
+    if (addedCategoryCount > 0) {
+      summaryParts.push(`新增 ${addedCategoryCount} 个分类`)
+    }
     useStore
       .getState()
-      .showToast(`已导入 ${data.tasks.length} 条记录`, 'success')
+      .showToast(summaryParts.join('，'), 'success')
   } catch (e) {
     useStore
       .getState()
