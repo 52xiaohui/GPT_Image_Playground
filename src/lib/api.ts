@@ -442,6 +442,9 @@ function shouldRetryResponsesWithCompatibility(error: unknown): boolean {
   if (!(error instanceof Error)) return false
 
   const status = (error as ApiError).status
+  if (status === 524) {
+    return false
+  }
   if (status != null && status >= 500) {
     return true
   }

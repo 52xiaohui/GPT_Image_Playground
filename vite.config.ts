@@ -1,5 +1,7 @@
 import { readFileSync } from 'fs'
+import { appendFile, mkdir } from 'fs/promises'
 import type { IncomingMessage, ServerResponse } from 'http'
+import { resolve } from 'path'
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 import { normalizeDevProxyConfig, normalizeProxyTargetBaseUrl } from './src/lib/devProxy'
@@ -25,6 +27,171 @@ const REQUEST_HEADERS_TO_SKIP = new Set([
   'host',
   DEV_PROXY_TARGET_HEADER,
 ])
+const LOGS_DIR = resolve(process.cwd(), 'logs')
+const SUCCESS_LOG_FILE = resolve(LOGS_DIR, 'proxy-success.jsonl')
+const ERROR_LOG_FILE = resolve(LOGS_DIR, 'proxy-error.jsonl')
+const LOG_STRING_PREVIEW_LIMIT = 1200
+const LOG_TEXT_PREVIEW_LIMIT = 6000
+const LOG_ARRAY_ITEM_LIMIT = 10
+const LOG_OBJECT_KEY_LIMIT = 30
+
+function createLogRequestId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+function isSensitiveFieldName(name: string): boolean {
+  return /authorization|api[-_]?key|cookie|token|secret|password/i.test(name)
+}
+
+function summarizeString(value: string): string {
+  if (/^Bearer\s+/i.test(value)) {
+    return '[REDACTED_BEARER_TOKEN]'
+  }
+
+  if (value.startsWith('data:')) {
+    const dataUrlMatch = /^data:([^;,]+)[^,]*,/.exec(value)
+    return `[data-url mime=${dataUrlMatch?.[1] || 'unknown'} length=${value.length}]`
+  }
+
+  if (/^[A-Za-z0-9+/=]{600,}$/.test(value)) {
+    return `[base64 length=${value.length}]`
+  }
+
+  if (value.length > LOG_STRING_PREVIEW_LIMIT) {
+    return `${value.slice(0, LOG_STRING_PREVIEW_LIMIT)}...[truncated ${value.length - LOG_STRING_PREVIEW_LIMIT} chars]`
+  }
+
+  return value
+}
+
+function sanitizeLogValue(value: unknown, depth = 0): unknown {
+  if (value == null || typeof value === 'boolean' || typeof value === 'number') {
+    return value
+  }
+
+  if (typeof value === 'string') {
+    return summarizeString(value)
+  }
+
+  if (depth >= 5) {
+    return '[max-depth-reached]'
+  }
+
+  if (Array.isArray(value)) {
+    const items = value
+      .slice(0, LOG_ARRAY_ITEM_LIMIT)
+      .map((item) => sanitizeLogValue(item, depth + 1))
+
+    if (value.length > LOG_ARRAY_ITEM_LIMIT) {
+      items.push(`[+${value.length - LOG_ARRAY_ITEM_LIMIT} more items]`)
+    }
+
+    return items
+  }
+
+  if (typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+    const sanitizedEntries = entries
+      .slice(0, LOG_OBJECT_KEY_LIMIT)
+      .map(([key, nestedValue]) => [
+        key,
+        isSensitiveFieldName(key) ? '[REDACTED]' : sanitizeLogValue(nestedValue, depth + 1),
+      ] as const)
+
+    const nextValue = Object.fromEntries(sanitizedEntries)
+    if (entries.length > LOG_OBJECT_KEY_LIMIT) {
+      nextValue.__truncatedKeys = entries.length - LOG_OBJECT_KEY_LIMIT
+    }
+    return nextValue
+  }
+
+  return String(value)
+}
+
+function tryParseJson(text: string): unknown | undefined {
+  try {
+    return JSON.parse(text) as unknown
+  } catch {
+    return undefined
+  }
+}
+
+function summarizeHeaders(headers: Record<string, string | string[] | undefined>): Record<string, unknown> {
+  const summarized: Record<string, unknown> = {}
+
+  for (const [name, value] of Object.entries(headers)) {
+    if (value == null) continue
+
+    if (isSensitiveFieldName(name)) {
+      summarized[name] = '[REDACTED]'
+      continue
+    }
+
+    summarized[name] = Array.isArray(value)
+      ? value.map((item) => summarizeString(item))
+      : summarizeString(value)
+  }
+
+  return summarized
+}
+
+function summarizeResponseHeaders(headers: Headers): Record<string, unknown> {
+  const summarized: Record<string, unknown> = {}
+
+  headers.forEach((value, name) => {
+    summarized[name] = isSensitiveFieldName(name) ? '[REDACTED]' : summarizeString(value)
+  })
+
+  return summarized
+}
+
+function summarizeBody(
+  body: Buffer | undefined,
+  contentType: string | string[] | null | undefined,
+): Record<string, unknown> | null {
+  if (!body || body.length === 0) return null
+
+  const normalizedContentTypeValue = Array.isArray(contentType) ? contentType[0] || '' : contentType || ''
+  const normalizedContentType = normalizedContentTypeValue.toLowerCase()
+  const bodySummary: Record<string, unknown> = {
+    contentType: normalizedContentTypeValue || 'unknown',
+    sizeBytes: body.length,
+  }
+
+  const shouldReadAsText =
+    !normalizedContentType ||
+    normalizedContentType.includes('application/json') ||
+    normalizedContentType.startsWith('text/') ||
+    normalizedContentType.includes('application/x-www-form-urlencoded')
+
+  if (!shouldReadAsText) {
+    bodySummary.preview = '[binary body omitted]'
+    return bodySummary
+  }
+
+  const text = body.toString('utf8')
+  const jsonPayload = tryParseJson(text)
+  if (jsonPayload !== undefined) {
+    bodySummary.json = sanitizeLogValue(jsonPayload)
+    return bodySummary
+  }
+
+  bodySummary.preview = summarizeString(
+    text.length > LOG_TEXT_PREVIEW_LIMIT
+      ? `${text.slice(0, LOG_TEXT_PREVIEW_LIMIT)}...[truncated ${text.length - LOG_TEXT_PREVIEW_LIMIT} chars]`
+      : text,
+  )
+  return bodySummary
+}
+
+async function appendJsonLine(filePath: string, payload: unknown): Promise<void> {
+  await mkdir(LOGS_DIR, { recursive: true })
+  await appendFile(filePath, `${JSON.stringify(payload)}\n`, 'utf8')
+}
+
+async function writeProxyLog(kind: 'success' | 'error', payload: unknown): Promise<void> {
+  await appendJsonLine(kind === 'success' ? SUCCESS_LOG_FILE : ERROR_LOG_FILE, payload)
+}
 
 function loadDevProxyConfig() {
   try {
@@ -126,6 +293,8 @@ async function proxyDevRequest(
   next: (error?: unknown) => void,
   config: NonNullable<ReturnType<typeof loadDevProxyConfig>>,
 ): Promise<void> {
+  const startedAt = Date.now()
+  const requestId = createLogRequestId()
   const requestUrl = new URL(req.url || '/', 'http://127.0.0.1')
   if (!matchesProxyPrefix(requestUrl.pathname, config.prefix)) {
     next()
@@ -145,17 +314,59 @@ async function proxyDevRequest(
   const targetUrl = new URL(targetBaseUrl)
   targetUrl.pathname = joinTargetPath(targetUrl.pathname, proxiedPath)
   targetUrl.search = requestUrl.search
+  const requestHeaders = summarizeHeaders(req.headers)
+  let requestBody: Buffer | undefined
 
   try {
-    const body = await readRequestBody(req)
+    requestBody = await readRequestBody(req)
     const upstream = await fetch(targetUrl, {
       method: req.method || 'GET',
       headers: buildUpstreamHeaders(req, targetUrl, config.changeOrigin),
-      body,
+      body: requestBody,
     })
     const responseBody = Buffer.from(await upstream.arrayBuffer())
+    const logEntry = {
+      requestId,
+      loggedAt: new Date().toISOString(),
+      durationMs: Date.now() - startedAt,
+      method: req.method || 'GET',
+      requestUrl: `${requestUrl.pathname}${requestUrl.search}`,
+      targetUrl: targetUrl.toString(),
+      status: upstream.status,
+      statusText: upstream.statusText,
+      request: {
+        headers: requestHeaders,
+        body: summarizeBody(requestBody, req.headers['content-type']),
+      },
+      response: {
+        headers: summarizeResponseHeaders(upstream.headers),
+        body: summarizeBody(responseBody, upstream.headers.get('content-type')),
+      },
+    }
     writeProxyResponse(res, upstream, responseBody)
+    void writeProxyLog(upstream.ok ? 'success' : 'error', logEntry).catch((error) => {
+      console.error('[dev-proxy] 写入日志失败:', error)
+    })
   } catch (error) {
+    const logEntry = {
+      requestId,
+      loggedAt: new Date().toISOString(),
+      durationMs: Date.now() - startedAt,
+      method: req.method || 'GET',
+      requestUrl: `${requestUrl.pathname}${requestUrl.search}`,
+      targetUrl: targetUrl.toString(),
+      request: {
+        headers: requestHeaders,
+        body: summarizeBody(requestBody, req.headers['content-type']),
+      },
+      error: {
+        message: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? summarizeString(error.stack || '') : undefined,
+      },
+    }
+    void writeProxyLog('error', logEntry).catch((writeError) => {
+      console.error('[dev-proxy] 写入错误日志失败:', writeError)
+    })
     res.statusCode = 502
     res.setHeader('Content-Type', 'text/plain; charset=utf-8')
     res.end(`本地代理转发失败：${error instanceof Error ? error.message : String(error)}`)
