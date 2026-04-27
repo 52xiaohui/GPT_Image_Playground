@@ -2,7 +2,7 @@ import { useEffect } from 'react'
 import { initStore, startRecycleBinJanitor } from './store'
 import { useStore } from './store'
 import { normalizeBaseUrl } from './lib/api'
-import type { ApiProtocol, RequestMode } from './types'
+import type { ApiProtocol, RequestMode, ResponsesImageInputMode, ResponsesTransportMode } from './types'
 import Header from './components/Header'
 import SearchBar from './components/SearchBar'
 import TaskGrid from './components/TaskGrid'
@@ -22,6 +22,10 @@ export default function App() {
       value === 'auto' || value === 'images' || value === 'responses'
     const isRequestMode = (value: string): value is RequestMode =>
       value === 'direct' || value === 'local_proxy'
+    const isResponsesTransportMode = (value: string): value is ResponsesTransportMode =>
+      value === 'auto' || value === 'stream' || value === 'json'
+    const isResponsesImageInputMode = (value: string): value is ResponsesImageInputMode =>
+      value === 'auto' || value === 'file_id'
 
     const searchParams = new URLSearchParams(window.location.search)
     const nextSettings: {
@@ -29,6 +33,8 @@ export default function App() {
       apiKey?: string
       apiProtocol?: ApiProtocol
       requestMode?: RequestMode
+      responsesTransport?: ResponsesTransportMode
+      responsesImageInputMode?: ResponsesImageInputMode
     } = {}
 
     const apiUrlParam = searchParams.get('apiUrl')
@@ -51,6 +57,19 @@ export default function App() {
       nextSettings.requestMode = requestModeParam.trim()
     }
 
+    const responsesTransportParam = searchParams.get('responsesTransport')
+    if (responsesTransportParam !== null && isResponsesTransportMode(responsesTransportParam.trim())) {
+      nextSettings.responsesTransport = responsesTransportParam.trim()
+    }
+
+    const responsesImageInputModeParam = searchParams.get('responsesImageInputMode')
+    if (
+      responsesImageInputModeParam !== null &&
+      isResponsesImageInputMode(responsesImageInputModeParam.trim())
+    ) {
+      nextSettings.responsesImageInputMode = responsesImageInputModeParam.trim()
+    }
+
     if (Object.keys(nextSettings).length > 0) {
       setSettings(nextSettings)
 
@@ -58,6 +77,8 @@ export default function App() {
       searchParams.delete('apiKey')
       searchParams.delete('apiProtocol')
       searchParams.delete('requestMode')
+      searchParams.delete('responsesTransport')
+      searchParams.delete('responsesImageInputMode')
 
       const nextSearch = searchParams.toString()
       const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash}`

@@ -5,6 +5,8 @@ export interface AppSettings {
   apiKey: string
   model: string
   responsesImageModel: string
+  responsesTransport: ResponsesTransportMode
+  responsesImageInputMode: ResponsesImageInputMode
   timeout: number
   apiProtocol: ApiProtocol
   requestMode: RequestMode
@@ -12,6 +14,8 @@ export interface AppSettings {
 
 export type ApiProtocol = 'auto' | 'images' | 'responses'
 export type RequestMode = 'direct' | 'local_proxy'
+export type ResponsesTransportMode = 'auto' | 'stream' | 'json'
+export type ResponsesImageInputMode = 'auto' | 'file_id'
 export type TaskView = 'gallery' | 'trash'
 
 export interface ProviderConfig extends AppSettings {
@@ -38,6 +42,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   apiKey: '',
   model: 'gpt-image-2',
   responsesImageModel: 'gpt-image-2',
+  responsesTransport: 'auto',
+  responsesImageInputMode: 'auto',
   timeout: 300,
   apiProtocol: 'auto',
   requestMode: DEFAULT_REQUEST_MODE,

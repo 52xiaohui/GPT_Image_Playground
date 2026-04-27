@@ -235,6 +235,8 @@ function normalizeProviderList(providers: unknown): ProviderConfig[] {
           apiKey: record.apiKey,
           model: record.model,
           responsesImageModel: record.responsesImageModel,
+          responsesTransport: record.responsesTransport,
+          responsesImageInputMode: record.responsesImageInputMode,
           timeout: record.timeout,
           apiProtocol: record.apiProtocol,
           requestMode: record.requestMode,

@@ -2,7 +2,14 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { normalizeBaseUrl } from '../lib/api'
 import { readClientDevProxyConfig } from '../lib/devProxy'
 import { useStore, exportData, importData, clearAllData } from '../store'
-import { DEFAULT_SETTINGS, type AppSettings, type ApiProtocol, type RequestMode } from '../types'
+import {
+  DEFAULT_SETTINGS,
+  type AppSettings,
+  type ApiProtocol,
+  type RequestMode,
+  type ResponsesImageInputMode,
+  type ResponsesTransportMode,
+} from '../types'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import Select from './Select'
 
@@ -15,6 +22,17 @@ const API_PROTOCOL_OPTIONS: Array<{ label: string; value: ApiProtocol }> = [
 const REQUEST_MODE_OPTIONS: Array<{ label: string; value: RequestMode }> = [
   { label: '本地代理', value: 'local_proxy' },
   { label: '直连', value: 'direct' },
+]
+
+const RESPONSES_TRANSPORT_OPTIONS: Array<{ label: string; value: ResponsesTransportMode }> = [
+  { label: '自动', value: 'auto' },
+  { label: '优先流式', value: 'stream' },
+  { label: '仅 JSON', value: 'json' },
+]
+
+const RESPONSES_IMAGE_INPUT_MODE_OPTIONS: Array<{ label: string; value: ResponsesImageInputMode }> = [
+  { label: '自动', value: 'auto' },
+  { label: '上传 file_id', value: 'file_id' },
 ]
 
 export default function SettingsModal() {
@@ -52,6 +70,9 @@ export default function SettingsModal() {
       apiKey: nextDraft.apiKey,
       model: nextDraft.model.trim() || DEFAULT_SETTINGS.model,
       responsesImageModel: nextDraft.responsesImageModel.trim() || DEFAULT_SETTINGS.responsesImageModel,
+      responsesTransport: nextDraft.responsesTransport || DEFAULT_SETTINGS.responsesTransport,
+      responsesImageInputMode:
+        nextDraft.responsesImageInputMode || DEFAULT_SETTINGS.responsesImageInputMode,
       timeout: Number(nextDraft.timeout) || DEFAULT_SETTINGS.timeout,
       apiProtocol: nextDraft.apiProtocol || DEFAULT_SETTINGS.apiProtocol,
       requestMode: nextDraft.requestMode || DEFAULT_SETTINGS.requestMode,
@@ -322,7 +343,7 @@ export default function SettingsModal() {
                   className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
                 />
                 <div className="mt-1 text-[10px] text-gray-400 dark:text-gray-500">
-                  Images API 下这里是直接调用的图片模型；Responses API 下这里是顶层主模型，例如 <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">gpt-5.3-codex</code>。
+                  Images API 下这里是直接调用的图片模型；Responses API 下这里是顶层主模型，应该填可用的文本模型，例如 <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">gpt-5.5</code>，不要填 <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">gpt-image-*</code>。
                 </div>
               </label>
 
@@ -338,6 +359,41 @@ export default function SettingsModal() {
                 />
                 <div className="mt-1 text-[10px] text-gray-400 dark:text-gray-500">
                   仅 Responses API 生效，会作为 <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">tools[].model</code> 传入，通常填 <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">gpt-image-2</code>。
+                </div>
+              </label>
+
+              <label className="block">
+                <span className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Responses 传输方式</span>
+                <Select
+                  value={draft.responsesTransport}
+                  onChange={(value) =>
+                    commitSettings({ ...draft, responsesTransport: value as ResponsesTransportMode })
+                  }
+                  options={RESPONSES_TRANSPORT_OPTIONS}
+                  className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
+                />
+                <div className="mt-1 text-[10px] text-gray-400 dark:text-gray-500">
+                  <div>自动：先尝试 <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">stream: true</code>，中转不兼容时再回退普通 JSON。</div>
+                  <div>优先流式：更有机会绕过 Cloudflare 120 秒空闲超时，但前提是整条中转链路支持 SSE 透传。</div>
+                </div>
+              </label>
+
+              <label className="block">
+                <span className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Responses 参考图输入</span>
+                <Select
+                  value={draft.responsesImageInputMode}
+                  onChange={(value) =>
+                    commitSettings({
+                      ...draft,
+                      responsesImageInputMode: value as ResponsesImageInputMode,
+                    })
+                  }
+                  options={RESPONSES_IMAGE_INPUT_MODE_OPTIONS}
+                  className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
+                />
+                <div className="mt-1 text-[10px] text-gray-400 dark:text-gray-500">
+                  <div>自动：公网图继续传 URL，本地图以内联 data URL 发送，兼容性最好。</div>
+                  <div><code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">file_id</code>：会先请求 <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">/v1/files</code>，只有中转站明确支持文件上传时再用。</div>
                 </div>
               </label>
 

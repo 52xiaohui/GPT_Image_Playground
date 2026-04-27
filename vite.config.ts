@@ -2,6 +2,8 @@ import { readFileSync } from 'fs'
 import { appendFile, mkdir } from 'fs/promises'
 import type { IncomingMessage, ServerResponse } from 'http'
 import { resolve } from 'path'
+import { Readable } from 'stream'
+import { pipeline } from 'stream/promises'
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 import { normalizeDevProxyConfig, normalizeProxyTargetBaseUrl } from './src/lib/devProxy'
@@ -275,7 +277,7 @@ function buildUpstreamHeaders(req: IncomingMessage, targetUrl: URL, changeOrigin
   return headers
 }
 
-function writeProxyResponse(res: ServerResponse, upstream: Response, body: Buffer): void {
+function writeProxyResponseHeaders(res: ServerResponse, upstream: Response): void {
   res.statusCode = upstream.status
   res.statusMessage = upstream.statusText
 
@@ -283,8 +285,36 @@ function writeProxyResponse(res: ServerResponse, upstream: Response, body: Buffe
     if (RESPONSE_HEADERS_TO_SKIP.has(name.toLowerCase())) return
     res.setHeader(name, value)
   })
+}
+
+function writeProxyResponse(res: ServerResponse, upstream: Response, body: Buffer): void {
+  writeProxyResponseHeaders(res, upstream)
 
   res.end(body)
+}
+
+function isEventStreamResponse(upstream: Response): boolean {
+  return upstream.headers.get('content-type')?.toLowerCase().includes('text/event-stream') === true
+}
+
+async function readWebStreamToBuffer(stream: any): Promise<Buffer> {
+  return Buffer.from(await new Response(stream).arrayBuffer())
+}
+
+async function writeProxyStreamResponse(res: ServerResponse, upstream: Response): Promise<Buffer> {
+  const body = upstream.body
+  if (!body) {
+    writeProxyResponseHeaders(res, upstream)
+    res.end()
+    return Buffer.alloc(0)
+  }
+
+  const [clientStream, logStream] = body.tee()
+  writeProxyResponseHeaders(res, upstream)
+  res.flushHeaders()
+  const logBufferPromise = readWebStreamToBuffer(logStream)
+  await pipeline(Readable.fromWeb(clientStream as any), res)
+  return await logBufferPromise
 }
 
 async function proxyDevRequest(
@@ -324,7 +354,10 @@ async function proxyDevRequest(
       headers: buildUpstreamHeaders(req, targetUrl, config.changeOrigin),
       body: requestBody,
     })
-    const responseBody = Buffer.from(await upstream.arrayBuffer())
+    const shouldStreamResponse = isEventStreamResponse(upstream) && upstream.body !== null
+    const responseBody = shouldStreamResponse
+      ? await writeProxyStreamResponse(res, upstream)
+      : Buffer.from(await upstream.arrayBuffer())
     const logEntry = {
       requestId,
       loggedAt: new Date().toISOString(),
@@ -343,7 +376,9 @@ async function proxyDevRequest(
         body: summarizeBody(responseBody, upstream.headers.get('content-type')),
       },
     }
-    writeProxyResponse(res, upstream, responseBody)
+    if (!shouldStreamResponse) {
+      writeProxyResponse(res, upstream, responseBody)
+    }
     void writeProxyLog(upstream.ok ? 'success' : 'error', logEntry).catch((error) => {
       console.error('[dev-proxy] 写入日志失败:', error)
     })
@@ -367,9 +402,14 @@ async function proxyDevRequest(
     void writeProxyLog('error', logEntry).catch((writeError) => {
       console.error('[dev-proxy] 写入错误日志失败:', writeError)
     })
-    res.statusCode = 502
-    res.setHeader('Content-Type', 'text/plain; charset=utf-8')
-    res.end(`本地代理转发失败：${error instanceof Error ? error.message : String(error)}`)
+    if (!res.headersSent) {
+      res.statusCode = 502
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8')
+      res.end(`本地代理转发失败：${error instanceof Error ? error.message : String(error)}`)
+      return
+    }
+
+    res.destroy(error instanceof Error ? error : new Error(String(error)))
   }
 }
 

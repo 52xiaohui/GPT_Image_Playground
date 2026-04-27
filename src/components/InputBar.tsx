@@ -620,7 +620,9 @@ export default function InputBar() {
 
           {settings.apiProtocol === 'responses' && localInputImageCount > 0 && (
             <div className="mt-3 rounded-2xl border border-amber-200/80 bg-amber-50/80 px-4 py-3 text-xs text-amber-700 shadow-sm dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-300">
-              当前参考图里有 {localInputImageCount} 张“本地”图片。它们会直接内联进 `Responses` 请求体，并在发送前自动缩边压缩；如果中转站处理较慢，仍可能触发 `524`，此时优先使用链条按钮添加的公网 `URL` 参考图会更稳。
+              {settings.responsesImageInputMode === 'file_id'
+                ? `当前参考图里有 ${localInputImageCount} 张“本地”图片。它们会先上传到 /v1/files，再以 file_id 引用；如果中转站没实现文件上传，接口会直接报错。`
+                : `当前参考图里有 ${localInputImageCount} 张“本地”图片。它们会直接内联进 Responses 请求体，并在发送前自动缩边压缩；如果中转站处理较慢，仍可能触发 524，此时优先使用链条按钮添加的公网 URL 参考图会更稳。`}
             </div>
           )}
 

@@ -1,4 +1,11 @@
-import type { ApiProtocol, AppSettings, ImageApiResponse, TaskParams } from '../types'
+import type {
+  ApiProtocol,
+  AppSettings,
+  ImageApiResponse,
+  ResponsesImageInputMode,
+  ResponsesTransportMode,
+  TaskParams,
+} from '../types'
 import { buildApiUrl, normalizeProxyTargetBaseUrl, readClientDevProxyConfig } from './devProxy'
 
 const MIME_MAP: Record<string, string> = {
@@ -284,7 +291,7 @@ function extractErrorMessage(payload: unknown): string | null {
 async function buildApiErrorFromResponse(response: Response): Promise<ApiError> {
   if (response.status === 524) {
     return createApiError(
-      '上游站点处理超时（Cloudflare 524）。如果这次带了本地参考图，请优先改用公网图片 URL，或减少参考图数量后重试。',
+      '上游站点处理超时（Cloudflare 524）。如果这次带了本地参考图，请优先改用公网图片 URL；若中转站支持 Responses 流式传输，也可优先启用 stream 模式后重试。',
       524,
     )
   }
@@ -417,14 +424,17 @@ type ResponsesInputContent =
   | ResponsesInputImage
 
 type ResponsesInputPayloadMode = 'compact-string' | 'message-list'
+type ResponsesTransportKind = 'json' | 'stream'
+type ResponsesActionMode = 'auto' | 'explicit'
+type ResponsesToolChoiceMode = 'omit' | 'force'
 
-type ResponsesBodyMode =
-  | 'edit-with-tool-choice'
-  | 'edit-basic'
-  | 'generate-with-tool-choice'
-  | 'generate-basic'
-  | 'generate-list-with-tool-choice'
-  | 'generate-list-basic'
+interface ResponsesRequestPlan {
+  id: string
+  inputPayloadMode: ResponsesInputPayloadMode
+  transport: ResponsesTransportKind
+  actionMode: ResponsesActionMode
+  toolChoiceMode: ResponsesToolChoiceMode
+}
 
 function getApiProtocol(settings: AppSettings): ApiProtocol {
   return settings.apiProtocol || 'auto'
@@ -434,6 +444,14 @@ function getResponsesImageModel(settings: AppSettings): string {
   return settings.responsesImageModel?.trim() || 'gpt-image-2'
 }
 
+function getResponsesTransportMode(settings: AppSettings): ResponsesTransportMode {
+  return settings.responsesTransport || 'auto'
+}
+
+function getResponsesImageInputMode(settings: AppSettings): ResponsesImageInputMode {
+  return settings.responsesImageInputMode || 'auto'
+}
+
 function buildRequestUrl(baseUrl: string, path: string, ctx: SharedRequestContext): string {
   return buildApiUrl(baseUrl, path, ctx.proxyConfig, { forceProxy: ctx.forceProxy })
 }
@@ -441,17 +459,51 @@ function buildRequestUrl(baseUrl: string, path: string, ctx: SharedRequestContex
 function shouldRetryResponsesWithCompatibility(error: unknown): boolean {
   if (!(error instanceof Error)) return false
 
-  const status = (error as ApiError).status
-  if (status === 524) {
+  if (isResponsesRelayFailure(error)) {
     return false
   }
-  if (status != null && status >= 500) {
+
+  const status = (error as ApiError).status
+  if (status != null && [404, 405, 409, 415, 422, 500, 501].includes(status)) {
     return true
   }
 
-  return /(?:HTTP 5\d{2}|tool(?:_choice)?|image_generation|response|internal|server error|input must be a list|input.*array|expected.*list|expected.*array)/i.test(
+  return /(?:HTTP 5\d{2}|tool(?:_choice)?|image_generation|response|internal|server error|input must be a list|input.*array|expected.*list|expected.*array|multipart|stream|sse|file_id)/i.test(
     error.message,
   )
+}
+
+function isResponsesRelayFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+
+  const status = (error as ApiError).status
+  if (status === 524) {
+    return true
+  }
+
+  return /(?:do_request_failed|upstream error|cloudflare|timeout occurred|timed out|auth_not_found|no auth available)/i.test(
+    error.message,
+  )
+}
+
+function shouldFallbackResponsesStreamToJson(
+  error: unknown,
+  currentPlan: ResponsesRequestPlan,
+  nextPlan?: ResponsesRequestPlan,
+): boolean {
+  if (currentPlan.transport !== 'stream' || nextPlan?.transport !== 'json') {
+    return false
+  }
+  if (!(error instanceof Error)) {
+    return false
+  }
+
+  const status = (error as ApiError).status
+  if (status != null && [401, 403, 429, 524].includes(status)) {
+    return false
+  }
+
+  return !/(?:auth_not_found|no auth available|invalid api key|insufficient|quota)/i.test(error.message)
 }
 
 async function readResponsesPayload(response: Response): Promise<unknown> {
@@ -643,6 +695,7 @@ async function deleteUploadedFile(baseUrl: string, fileId: string, ctx: SharedRe
 async function prepareResponsesInputImages(
   baseUrl: string,
   inputImageDataUrls: string[],
+  imageInputMode: ResponsesImageInputMode,
   ctx: SharedRequestContext,
 ): Promise<{ inputImages: ResponsesInputImage[]; uploadedFileIds: string[] }> {
   if (!inputImageDataUrls.length) {
@@ -674,6 +727,31 @@ async function prepareResponsesInputImages(
     }
 
     if (isDataUrl(inputImage)) {
+      if (imageInputMode === 'file_id') {
+        try {
+          const fileId = await uploadInputImageAsFileId(baseUrl, inputImage, i, ctx)
+          uploadedFileIds.push(fileId)
+          inputImages.push({
+            type: 'input_image',
+            file_id: fileId,
+          })
+          continue
+        } catch (error) {
+          const status = (error as ApiError | undefined)?.status
+          const message = error instanceof Error ? error.message : String(error)
+          if (
+            (status != null && [400, 404, 405, 415, 422, 501].includes(status)) ||
+            /(?:\/v1\/files|multipart|file upload|file_id|vision|unsupported|not implemented)/i.test(message)
+          ) {
+            throw createApiError(
+              '当前中转站不支持 Responses 参考图 file_id 上传，请把“Responses 参考图输入”改回“自动”后重试。',
+              status,
+            )
+          }
+          throw error
+        }
+      }
+
       // Responses API 支持把 data URL 直接作为 input_image.image_url 传入，
       // 这样可避免依赖部分中转站未实现的 /v1/files。
       const optimizedDataUrl = await shrinkDataUrlForResponses(inputImage, inlineImageTargetBytes)
@@ -723,17 +801,84 @@ function buildResponsesInputPayload(
   return buildResponsesInput(prompt, inputImages)
 }
 
+function getPreferredResponsesTransports(settings: AppSettings): ResponsesTransportKind[] {
+  const mode = getResponsesTransportMode(settings)
+  if (mode === 'stream') return ['stream']
+  if (mode === 'json') return ['json']
+  return ['stream', 'json']
+}
+
+function buildResponsesRequestPlans(
+  opts: CallApiOptions,
+  inputImages: ResponsesInputImage[],
+): ResponsesRequestPlan[] {
+  const hasReferenceImages = inputImages.length > 0
+  const defaultInputPayloadMode: ResponsesInputPayloadMode = hasReferenceImages ? 'message-list' : 'compact-string'
+  const transports = getPreferredResponsesTransports(opts.settings)
+  const allowJsonCompatibilityFallback = getResponsesTransportMode(opts.settings) === 'auto'
+  const compatibilityTransports: ResponsesTransportKind[] = allowJsonCompatibilityFallback ? ['json'] : transports
+  const plans: ResponsesRequestPlan[] = []
+
+  const pushPlan = (plan: ResponsesRequestPlan) => {
+    if (!plans.some((item) => item.id === plan.id)) {
+      plans.push(plan)
+    }
+  }
+
+  for (const transport of transports) {
+    pushPlan({
+      id: `official-${transport}-${defaultInputPayloadMode}`,
+      inputPayloadMode: defaultInputPayloadMode,
+      transport,
+      actionMode: 'auto',
+      toolChoiceMode: 'omit',
+    })
+  }
+
+  if (hasReferenceImages) {
+    for (const transport of compatibilityTransports) {
+      pushPlan({
+        id: `explicit-action-${transport}`,
+        inputPayloadMode: 'message-list',
+        transport,
+        actionMode: 'explicit',
+        toolChoiceMode: 'omit',
+      })
+    }
+  }
+
+  if (!hasReferenceImages) {
+    for (const transport of compatibilityTransports) {
+      pushPlan({
+        id: `message-list-${transport}`,
+        inputPayloadMode: 'message-list',
+        transport,
+        actionMode: 'auto',
+        toolChoiceMode: 'omit',
+      })
+    }
+  }
+
+  for (const transport of compatibilityTransports) {
+    pushPlan({
+      id: `forced-tool-${transport}-${defaultInputPayloadMode}`,
+      inputPayloadMode: defaultInputPayloadMode,
+      transport,
+      actionMode: hasReferenceImages ? 'explicit' : 'auto',
+      toolChoiceMode: 'force',
+    })
+  }
+
+  return plans
+}
+
 function buildResponsesBody(
   opts: CallApiOptions,
   inputImages: ResponsesInputImage[],
-  mode: ResponsesBodyMode,
+  plan: ResponsesRequestPlan,
 ): Record<string, unknown> {
   const { settings, prompt, params } = opts
   const hasReferenceImages = inputImages.length > 0
-  const inputPayloadMode: ResponsesInputPayloadMode =
-    hasReferenceImages || mode === 'generate-list-with-tool-choice' || mode === 'generate-list-basic'
-      ? 'message-list'
-      : 'compact-string'
   const tool: Record<string, unknown> = {
     type: 'image_generation',
     model: getResponsesImageModel(settings),
@@ -754,40 +899,28 @@ function buildResponsesBody(
   if (params.output_format !== 'png' && params.output_compression != null) {
     tool.output_compression = params.output_compression
   }
-  tool.action = hasReferenceImages ? 'edit' : 'generate'
+  if (plan.actionMode === 'explicit') {
+    tool.action = hasReferenceImages ? 'edit' : 'generate'
+  }
+  if (plan.transport === 'stream') {
+    tool.partial_images = 1
+  }
 
   const body: Record<string, unknown> = {
     model: settings.model,
-    input: buildResponsesInputPayload(prompt, inputImages, inputPayloadMode),
+    input: buildResponsesInputPayload(prompt, inputImages, plan.inputPayloadMode),
     tools: [tool],
   }
 
-  if (
-    mode === 'edit-with-tool-choice' ||
-    mode === 'generate-with-tool-choice' ||
-    mode === 'generate-list-with-tool-choice'
-  ) {
+  if (plan.transport === 'stream') {
+    body.stream = true
+  }
+
+  if (plan.toolChoiceMode === 'force') {
     body.tool_choice = { type: 'image_generation' }
   }
 
   return body
-}
-
-function buildResponsesBodies(
-  opts: CallApiOptions,
-  inputImages: ResponsesInputImage[],
-): Array<Record<string, unknown>> {
-  const modes: ResponsesBodyMode[] =
-    inputImages.length > 0
-      ? ['edit-with-tool-choice', 'edit-basic']
-      : [
-          'generate-with-tool-choice',
-          'generate-basic',
-          'generate-list-with-tool-choice',
-          'generate-list-basic',
-        ]
-
-  return modes.map((mode) => buildResponsesBody(opts, inputImages, mode))
 }
 
 async function callResponsesApi(
@@ -796,18 +929,23 @@ async function callResponsesApi(
 ): Promise<CallApiResult> {
   const requestCount = Math.max(1, opts.params.n || 1)
   const images: string[] = []
+  const responsesImageInputMode = getResponsesImageInputMode(opts.settings)
   const { inputImages, uploadedFileIds } = await prepareResponsesInputImages(
     opts.settings.baseUrl,
     opts.inputImageDataUrls,
+    responsesImageInputMode,
     ctx,
   )
-  const requestBodies = buildResponsesBodies(opts, inputImages)
+  const requestPlans = buildResponsesRequestPlans(opts, inputImages)
 
   try {
     for (let i = 0; i < requestCount; i++) {
       let lastError: unknown = null
 
-      for (let bodyIndex = 0; bodyIndex < requestBodies.length; bodyIndex++) {
+      for (let planIndex = 0; planIndex < requestPlans.length; planIndex++) {
+        const plan = requestPlans[planIndex]
+        const nextPlan = requestPlans[planIndex + 1]
+
         try {
           const response = await fetch(buildRequestUrl(opts.settings.baseUrl, 'responses', ctx), {
             method: 'POST',
@@ -816,7 +954,7 @@ async function callResponsesApi(
               'Content-Type': 'application/json',
             },
             cache: 'no-store',
-            body: JSON.stringify(requestBodies[bodyIndex]),
+            body: JSON.stringify(buildResponsesBody(opts, inputImages, plan)),
             signal: ctx.controller.signal,
           })
 
@@ -835,8 +973,12 @@ async function callResponsesApi(
           break
         } catch (error) {
           lastError = error
-          const isLastBody = bodyIndex === requestBodies.length - 1
-          if (isLastBody || !shouldRetryResponsesWithCompatibility(error)) {
+          const isLastPlan = planIndex === requestPlans.length - 1
+          if (
+            isLastPlan ||
+            (!shouldRetryResponsesWithCompatibility(error) &&
+              !shouldFallbackResponsesStreamToJson(error, plan, nextPlan))
+          ) {
             throw error
           }
         }
