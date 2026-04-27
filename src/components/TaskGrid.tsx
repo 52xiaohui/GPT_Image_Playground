@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import {
   ALL_CATEGORY_FILTER,
+  FAVORITES_CATEGORY_FILTER,
   UNCATEGORIZED_CATEGORY_FILTER,
   type TaskRecord,
   isTaskInRecycleBin,
@@ -14,6 +15,8 @@ import {
   editOutputs,
   moveTaskToCategory,
   moveTasksToCategory,
+  setTasksFavorite,
+  toggleTaskFavorite,
   removeTask,
   removeTasks,
   restoreTask,
@@ -22,9 +25,25 @@ import {
 import MoveCategoryModal from './MoveCategoryModal'
 import Select from './Select'
 import TaskCard from './TaskCard'
+import TaskContextMenu from './TaskContextMenu'
 
 const INITIAL_VISIBLE_TASK_COUNT = 24
 const LOAD_MORE_TASK_COUNT = 24
+const BOX_SELECT_THRESHOLD = 6
+
+function isSelectableGridTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false
+  if (
+    target.closest('button, input, textarea, select, a, [role="button"], [data-task-menu-root]')
+  ) {
+    return false
+  }
+  return true
+}
+
+function rectsIntersect(a: DOMRect, b: DOMRect) {
+  return !(a.right < b.left || a.left > b.right || a.bottom < b.top || a.top > b.bottom)
+}
 
 export default function TaskGrid() {
   const tasks = useStore((s) => s.tasks)
@@ -41,11 +60,32 @@ export default function TaskGrid() {
   const setDetailTaskId = useStore((s) => s.setDetailTaskId)
   const setConfirmDialog = useStore((s) => s.setConfirmDialog)
   const showToast = useStore((s) => s.showToast)
+  const gridRef = useRef<HTMLDivElement | null>(null)
   const loadMoreRef = useRef<HTMLDivElement | null>(null)
+  const boxSelectionRef = useRef<{
+    startX: number
+    startY: number
+    additive: boolean
+    initialSelectedIds: string[]
+    startedOnTaskCard: boolean
+    dragging: boolean
+  } | null>(null)
+  const suppressOpenUntilRef = useRef(0)
   const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE_TASK_COUNT)
   const [batchCategoryTarget, setBatchCategoryTarget] = useState(UNCATEGORIZED_CATEGORY_FILTER)
   const [movingTask, setMovingTask] = useState<TaskRecord | null>(null)
   const [moveCategoryTarget, setMoveCategoryTarget] = useState(UNCATEGORIZED_CATEGORY_FILTER)
+  const [selectionBox, setSelectionBox] = useState<null | {
+    left: number
+    top: number
+    width: number
+    height: number
+  }>(null)
+  const [contextMenuState, setContextMenuState] = useState<{
+    task: TaskRecord
+    x: number
+    y: number
+  } | null>(null)
   const categoryIdSet = useMemo(() => new Set(categories.map((category) => category.id)), [categories])
   const sourceTasks = useMemo(
     () =>
@@ -69,6 +109,8 @@ export default function TaskGrid() {
           ? true
           : activeCategoryFilter === ALL_CATEGORY_FILTER
             ? true
+            : activeCategoryFilter === FAVORITES_CATEGORY_FILTER
+              ? Boolean(t.isFavorite)
             : activeCategoryFilter === UNCATEGORIZED_CATEGORY_FILTER
               ? !t.categoryId || !categoryIdSet.has(t.categoryId)
               : t.categoryId === activeCategoryFilter
@@ -121,6 +163,10 @@ export default function TaskGrid() {
     setMoveCategoryTarget(UNCATEGORIZED_CATEGORY_FILTER)
   }, [categories, moveCategoryTarget, movingTask])
 
+  useEffect(() => () => {
+    document.body.style.userSelect = ''
+  }, [])
+
   useEffect(() => {
     if (visibleCount >= filteredTasks.length) return
     const node = loadMoreRef.current
@@ -141,6 +187,12 @@ export default function TaskGrid() {
     return () => observer.disconnect()
   }, [filteredTasks.length, visibleCount])
 
+  useEffect(() => {
+    if (!contextMenuState) return
+    if (filteredTasks.some((task) => task.id === contextMenuState.task.id)) return
+    setContextMenuState(null)
+  }, [contextMenuState, filteredTasks])
+
   const renderedTasks = useMemo(
     () => filteredTasks.slice(0, visibleCount),
     [filteredTasks, visibleCount],
@@ -155,6 +207,7 @@ export default function TaskGrid() {
     [sourceTasks, selectedIdSet],
   )
   const selectedCount = selectedIdSet.size
+  const allSelectedFavorited = selectedTasks.length > 0 && selectedTasks.every((task) => Boolean(task.isFavorite))
 
   const visibleSelectedCount = useMemo(
     () => visibleTaskIds.filter((id) => selectedIdSet.has(id)).length,
@@ -257,8 +310,99 @@ export default function TaskGrid() {
     }
   }
 
+  const handleBatchFavorite = async () => {
+    if (!selectedTasks.length) return
+    await setTasksFavorite(selectedTasks, !allSelectedFavorited)
+  }
+
+  const handleTaskContextMenu = (task: TaskRecord) => (event: ReactMouseEvent<HTMLDivElement>) => {
+    event.preventDefault()
+    event.stopPropagation()
+    setContextMenuState({
+      task,
+      x: event.clientX,
+      y: event.clientY,
+    })
+  }
+
+  const handleTaskOpen = (taskId: string) => {
+    if (Date.now() < suppressOpenUntilRef.current) return
+    setDetailTaskId(taskId)
+  }
+
+  const handleGridMouseDownCapture = (event: ReactMouseEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || !filteredTasks.length || !isSelectableGridTarget(event.target)) return
+
+    setContextMenuState(null)
+    const target = event.target instanceof HTMLElement ? event.target : null
+    boxSelectionRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      additive: event.ctrlKey || event.metaKey,
+      initialSelectedIds: selectedTaskIds,
+      startedOnTaskCard: Boolean(target?.closest('[data-task-card-root]')),
+      dragging: false,
+    }
+
+    const updateSelection = (moveEvent: MouseEvent) => {
+      const currentSelection = boxSelectionRef.current
+      if (!currentSelection) return
+
+      const deltaX = moveEvent.clientX - currentSelection.startX
+      const deltaY = moveEvent.clientY - currentSelection.startY
+      const distance = Math.hypot(deltaX, deltaY)
+      if (!currentSelection.dragging && distance < BOX_SELECT_THRESHOLD) {
+        return
+      }
+
+      if (!currentSelection.dragging) {
+        currentSelection.dragging = true
+        document.body.style.userSelect = 'none'
+      }
+
+      const nextBox = {
+        left: Math.min(currentSelection.startX, moveEvent.clientX),
+        top: Math.min(currentSelection.startY, moveEvent.clientY),
+        width: Math.abs(deltaX),
+        height: Math.abs(deltaY),
+      }
+      setSelectionBox(nextBox)
+
+      const boxRect = new DOMRect(nextBox.left, nextBox.top, nextBox.width, nextBox.height)
+      const taskCards = Array.from(
+        gridRef.current?.querySelectorAll<HTMLElement>('[data-task-card-root][data-task-id]') ?? [],
+      )
+      const hitTaskIds = taskCards
+        .filter((card) => rectsIntersect(card.getBoundingClientRect(), boxRect))
+        .map((card) => card.dataset.taskId || '')
+        .filter(Boolean)
+      setSelectedTaskIds(
+        currentSelection.additive
+          ? Array.from(new Set([...currentSelection.initialSelectedIds, ...hitTaskIds]))
+          : hitTaskIds,
+      )
+    }
+
+    const finishSelection = () => {
+      const currentSelection = boxSelectionRef.current
+      if (currentSelection?.dragging) {
+        suppressOpenUntilRef.current = Date.now() + 180
+      } else if (!currentSelection?.additive && !currentSelection?.startedOnTaskCard) {
+        clearSelectedTasks()
+      }
+      boxSelectionRef.current = null
+      setSelectionBox(null)
+      document.body.style.userSelect = ''
+      window.removeEventListener('mousemove', updateSelection)
+      window.removeEventListener('mouseup', finishSelection)
+    }
+
+    window.addEventListener('mousemove', updateSelection)
+    window.addEventListener('mouseup', finishSelection)
+  }
+
   return (
-    <div className="space-y-4">
+    <div className="space-y-4" ref={gridRef} onMouseDownCapture={handleGridMouseDownCapture}>
       {showSelectionBar && (
         <div className="flex flex-col gap-3 rounded-2xl border border-gray-200/80 bg-white/80 px-4 py-3 backdrop-blur-sm dark:border-white/[0.08] dark:bg-gray-900/70 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
@@ -274,6 +418,16 @@ export default function TaskGrid() {
           <div className="flex flex-wrap gap-2">
             {taskView === 'gallery' && (
               <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleBatchFavorite()
+                  }}
+                  disabled={!selectedCount}
+                  className="px-3 py-1.5 rounded-lg border border-amber-200/80 bg-amber-50 text-sm text-amber-600 transition hover:bg-amber-100/80 disabled:cursor-not-allowed disabled:opacity-40 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-300 dark:hover:bg-amber-500/20"
+                >
+                  {allSelectedFavorited ? '取消收藏' : '加入收藏'}
+                </button>
                 <div className="min-w-[10rem]">
                   <Select
                     value={batchCategoryTarget}
@@ -368,14 +522,19 @@ export default function TaskGrid() {
                 categoryName={resolveTaskCategoryName(task, categories)}
                 providerName={resolveTaskProviderName(task, providers)}
                 isInRecycleBin={taskView === 'trash'}
+                isFavorite={Boolean(task.isFavorite)}
                 selected={selectedIdSet.has(task.id)}
-                onClick={() => setDetailTaskId(task.id)}
+                onClick={() => handleTaskOpen(task.id)}
                 onToggleSelect={() => toggleTaskSelection(task.id)}
                 onReuse={() => reuseConfig(task)}
                 onEditOutputs={() => editOutputs(task)}
+                onToggleFavorite={() => {
+                  void toggleTaskFavorite(task)
+                }}
                 onMoveCategory={() => openMoveCategoryModal(task)}
                 onDelete={() => handleDelete(task)}
                 onRestore={() => handleRestore(task)}
+                onContextMenu={handleTaskContextMenu(task)}
               />
             ))}
           </div>
@@ -405,6 +564,59 @@ export default function TaskGrid() {
         onClose={() => setMovingTask(null)}
         onConfirm={() => {
           void handleSingleTaskMoveCategory()
+        }}
+      />
+      {selectionBox && (
+        <div
+          className="pointer-events-none fixed z-[9997] rounded-2xl border border-blue-400/80 bg-blue-400/12 shadow-[0_0_0_1px_rgba(59,130,246,0.18)]"
+          style={{
+            left: selectionBox.left,
+            top: selectionBox.top,
+            width: selectionBox.width,
+            height: selectionBox.height,
+          }}
+        />
+      )}
+      <TaskContextMenu
+        task={contextMenuState?.task ?? null}
+        x={contextMenuState?.x ?? 0}
+        y={contextMenuState?.y ?? 0}
+        isInRecycleBin={taskView === 'trash'}
+        onClose={() => setContextMenuState(null)}
+        onOpen={() => {
+          if (contextMenuState?.task) {
+            handleTaskOpen(contextMenuState.task.id)
+          }
+        }}
+        onReuse={() => {
+          if (contextMenuState?.task) {
+            void reuseConfig(contextMenuState.task)
+          }
+        }}
+        onEdit={() => {
+          if (contextMenuState?.task) {
+            void editOutputs(contextMenuState.task)
+          }
+        }}
+        onToggleFavorite={() => {
+          if (contextMenuState?.task) {
+            void toggleTaskFavorite(contextMenuState.task)
+          }
+        }}
+        onMoveCategory={() => {
+          if (contextMenuState?.task) {
+            openMoveCategoryModal(contextMenuState.task)
+          }
+        }}
+        onDelete={() => {
+          if (contextMenuState?.task) {
+            handleDelete(contextMenuState.task)
+          }
+        }}
+        onRestore={() => {
+          if (contextMenuState?.task) {
+            handleRestore(contextMenuState.task)
+          }
         }}
       />
     </div>

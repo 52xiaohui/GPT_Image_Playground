@@ -8,6 +8,7 @@ import SearchBar from './components/SearchBar'
 import TaskGrid from './components/TaskGrid'
 import InputBar from './components/InputBar'
 import DetailModal from './components/DetailModal'
+import ImageEditModal from './components/ImageEditModal'
 import Lightbox from './components/Lightbox'
 import SettingsModal from './components/SettingsModal'
 import ConfirmDialog from './components/ConfirmDialog'
@@ -101,6 +102,7 @@ export default function App() {
         <TaskGrid />
       </main>
       <InputBar />
+      <ImageEditModal />
       <DetailModal />
       <Lightbox />
       <SettingsModal />

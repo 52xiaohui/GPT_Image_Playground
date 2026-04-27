@@ -18,6 +18,23 @@ export type ResponsesTransportMode = 'auto' | 'stream' | 'json'
 export type ResponsesImageInputMode = 'auto' | 'file_id'
 export type TaskView = 'gallery' | 'trash'
 
+export interface ImageEditSelection {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export interface ImageEditSession {
+  taskId: string
+  providerId: string | null
+  sourceImageId: string
+  sourceImageDataUrl: string
+  prompt: string
+  params: TaskParams
+  initialSelection?: ImageEditSelection | null
+}
+
 export interface ProviderConfig extends AppSettings {
   id: string
   name: string
@@ -30,6 +47,7 @@ export interface CategoryConfig {
 }
 
 export const ALL_CATEGORY_FILTER = '__all__'
+export const FAVORITES_CATEGORY_FILTER = '__favorites__'
 export const UNCATEGORIZED_CATEGORY_FILTER = '__uncategorized__'
 export const UNCATEGORIZED_CATEGORY_NAME = '未分类'
 export const UNKNOWN_TASK_PROVIDER_NAME = '未记录供应商'
@@ -76,6 +94,13 @@ export interface InputImage {
   id: string
   /** 可直接用于预览的图片地址（data URL 或公网 http(s) URL） */
   dataUrl: string
+  /** 局部编辑时使用的蒙版图，仅在提交阶段参与请求 */
+  maskDataUrl?: string | null
+  /** 蒙版对应的选区，使用 0-1 相对坐标 */
+  editSelection?: ImageEditSelection | null
+  /** 追踪它来自哪条任务/哪张输出图，方便回到编辑器继续调整 */
+  sourceTaskId?: string | null
+  sourceImageId?: string | null
 }
 
 // ===== 任务记录 =====
@@ -94,10 +119,18 @@ export interface TaskRecord {
   categoryName?: string | null
   /** 移入回收站时间，null 表示仍在画廊 */
   deletedAt?: number | null
+  /** 收藏状态，独立于分类存在 */
+  isFavorite?: boolean
   prompt: string
   params: TaskParams
   /** 输入图片的 image store id 列表 */
   inputImageIds: string[]
+  /** 局部编辑蒙版图片 id */
+  editMaskImageId?: string | null
+  /** 蒙版对应的输出图 id */
+  editSourceImageId?: string | null
+  /** 蒙版选区，使用 0-1 相对坐标 */
+  editSelection?: ImageEditSelection | null
   /** 输出图片的 image store id 列表 */
   outputImages: string[]
   status: TaskStatus
@@ -155,6 +188,8 @@ export interface ExportData {
   activeProviderId?: string
   categories?: CategoryConfig[]
   activeCategoryFilter?: string
+  params?: TaskParams
+  persistedState?: Record<string, unknown>
   tasks: TaskRecord[]
   /** imageId → 图片信息 */
   imageFiles: Record<string, {
@@ -202,6 +237,7 @@ export function resolveCategoryFilterName(
   categories: CategoryConfig[],
 ): string {
   if (filter === ALL_CATEGORY_FILTER) return '全部分类'
+  if (filter === FAVORITES_CATEGORY_FILTER) return '收藏'
   if (filter === UNCATEGORIZED_CATEGORY_FILTER) return UNCATEGORIZED_CATEGORY_NAME
 
   const category = categories.find((item) => item.id === filter)

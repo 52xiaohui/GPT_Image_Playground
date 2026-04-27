@@ -1,4 +1,4 @@
-import { memo, useEffect, useState } from 'react'
+import { memo, useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import type { TaskRecord } from '../types'
 import { getCachedImage, ensureImageCached } from '../store'
 import { formatImageRatio } from '../lib/size'
@@ -8,14 +8,17 @@ interface Props {
   categoryName: string
   providerName: string
   isInRecycleBin: boolean
+  isFavorite: boolean
   selected: boolean
   onReuse: () => void
   onEditOutputs: () => void
+  onToggleFavorite: () => void
   onMoveCategory: () => void
   onDelete: () => void
   onRestore: () => void
   onClick: () => void
   onToggleSelect: () => void
+  onContextMenu: (event: ReactMouseEvent<HTMLDivElement>) => void
 }
 
 const imageMetaCache = new Map<string, { ratio: string; size: string }>()
@@ -25,14 +28,17 @@ function TaskCard({
   categoryName,
   providerName,
   isInRecycleBin,
+  isFavorite,
   selected,
   onReuse,
   onEditOutputs,
+  onToggleFavorite,
   onMoveCategory,
   onDelete,
   onRestore,
   onClick,
   onToggleSelect,
+  onContextMenu,
 }: Props) {
   const [thumbSrc, setThumbSrc] = useState<string>('')
   const [coverRatio, setCoverRatio] = useState<string>('')
@@ -120,6 +126,8 @@ function TaskCard({
 
   return (
     <div
+      data-task-card-root
+      data-task-id={task.id}
       className={`bg-white dark:bg-gray-900 rounded-xl border overflow-hidden cursor-pointer transition-all hover:-translate-y-0.5 hover:shadow-lg ${
         selected
           ? 'border-blue-500 ring-2 ring-blue-100 dark:ring-blue-500/20'
@@ -128,10 +136,31 @@ function TaskCard({
             : 'border-gray-200 dark:border-white/[0.08]'
       }`}
       onClick={onClick}
+      onContextMenu={onContextMenu}
     >
       <div className="flex h-40">
         {/* 左侧图片区域 */}
         <div className="w-40 min-w-[10rem] h-full bg-gray-100 dark:bg-black/20 relative flex items-center justify-center overflow-hidden flex-shrink-0">
+          {!isInRecycleBin && (
+            <button
+              type="button"
+              className={`absolute top-1.5 right-9 z-10 flex h-6 w-6 items-center justify-center rounded-md border backdrop-blur-sm transition ${
+                isFavorite
+                  ? 'border-amber-300 bg-amber-400 text-black shadow-sm'
+                  : 'border-white/60 bg-white/80 text-transparent hover:text-amber-500 dark:border-white/10 dark:bg-black/40 dark:hover:text-amber-300'
+              }`}
+              onClick={(e) => {
+                e.stopPropagation()
+                onToggleFavorite()
+              }}
+              title={isFavorite ? '取消收藏' : '加入收藏'}
+              aria-label={isFavorite ? '取消收藏' : '加入收藏'}
+            >
+              <svg className="h-3.5 w-3.5" fill={isFavorite ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="m11.049 2.927 2.037 4.128 4.556.663-3.297 3.213.778 4.538L11.05 13.33 6.978 15.47l.778-4.538-3.297-3.213 4.556-.663 2.034-4.128Z" />
+              </svg>
+            </button>
+          )}
           <button
             type="button"
             className={`absolute top-1.5 right-1.5 z-10 flex h-6 w-6 items-center justify-center rounded-md border backdrop-blur-sm transition ${
@@ -259,6 +288,11 @@ function TaskCard({
               {isInRecycleBin && (
                 <span className="text-xs px-1.5 py-0.5 rounded bg-amber-50 text-amber-600 dark:bg-amber-500/10 dark:text-amber-300 flex-shrink-0">
                   回收站
+                </span>
+              )}
+              {!isInRecycleBin && isFavorite && (
+                <span className="text-xs px-1.5 py-0.5 rounded bg-amber-50 text-amber-600 dark:bg-amber-500/10 dark:text-amber-300 flex-shrink-0">
+                  收藏
                 </span>
               )}
               <span
@@ -404,6 +438,7 @@ export default memo(TaskCard, (prevProps, nextProps) => {
     prevProps.categoryName === nextProps.categoryName &&
     prevProps.providerName === nextProps.providerName &&
     prevProps.isInRecycleBin === nextProps.isInRecycleBin &&
+    prevProps.isFavorite === nextProps.isFavorite &&
     prevProps.selected === nextProps.selected
   )
 })

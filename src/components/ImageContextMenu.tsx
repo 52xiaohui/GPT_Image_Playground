@@ -13,6 +13,7 @@ export default function ImageContextMenu() {
         const imgTarget = target as HTMLImageElement
         // 忽略没有 src 或空的 img
         if (!imgTarget.src) return
+        if (imgTarget.closest('[data-task-card-root], [data-image-edit-root]')) return
 
         e.preventDefault()
         setMenuInfo({

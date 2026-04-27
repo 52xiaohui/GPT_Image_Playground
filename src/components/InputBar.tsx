@@ -1,8 +1,16 @@
 import { useRef, useEffect, useCallback, useState } from 'react'
-import { useStore, submitTask, addImageFromFile, addImageFromUrl } from '../store'
+import {
+  useStore,
+  submitTask,
+  addImageFromFile,
+  addImageFromUrl,
+  clearInputImageEdit,
+  reopenImageEditorFromInputImage,
+} from '../store'
 import {
   ALL_CATEGORY_FILTER,
   DEFAULT_PARAMS,
+  FAVORITES_CATEGORY_FILTER,
   resolveCategoryFilterName,
 } from '../types'
 import { normalizeImageSize } from '../lib/size'
@@ -99,7 +107,7 @@ export default function InputBar() {
     value: provider.id,
   }))
   const generationTargetLabel =
-    activeCategoryFilter === ALL_CATEGORY_FILTER
+    activeCategoryFilter === ALL_CATEGORY_FILTER || activeCategoryFilter === FAVORITES_CATEGORY_FILTER
       ? '未分类'
       : resolveCategoryFilterName(activeCategoryFilter, categories)
 
@@ -107,6 +115,10 @@ export default function InputBar() {
   const atImageLimit = inputImages.length >= API_MAX_IMAGES
   const localInputImageCount = inputImages.filter((img) => !isRemotePreviewUrl(img.dataUrl)).length
   const remoteInputImageCount = inputImages.length - localInputImageCount
+  const maskedInputCount = inputImages.filter((img) => Boolean(img.maskDataUrl)).length
+  const primaryMaskedInputIndex = inputImages.findIndex((img) => Boolean(img.maskDataUrl))
+  const primaryMaskedInput =
+    primaryMaskedInputIndex >= 0 ? inputImages[primaryMaskedInputIndex] : null
   const normalizedPrompt = prompt.trim()
   const promptPreview =
     normalizedPrompt.replace(/\s+/g, ' ').slice(0, 120) || '输入框已收起，点击展开继续编辑'
@@ -414,6 +426,11 @@ export default function InputBar() {
               >
                 {isRemotePreviewUrl(img.dataUrl) ? 'URL' : '本地'}
               </span>
+              {img.maskDataUrl && (
+                <span className="absolute right-1 bottom-1 rounded bg-emerald-500/90 px-1 py-0.5 text-[9px] leading-none text-white shadow-sm">
+                  蒙版
+                </span>
+              )}
             </div>
             <span
               className="absolute -top-2 -right-2 w-[22px] h-[22px] rounded-full bg-red-500 text-white flex items-center justify-center cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity shadow-md hover:bg-red-600"
@@ -618,6 +635,49 @@ export default function InputBar() {
             )
           )}
 
+          {maskedInputCount > 0 && (
+            <div className="mt-3 rounded-2xl border border-emerald-200/80 bg-emerald-50/80 px-4 py-3 text-xs text-emerald-700 shadow-sm dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-300">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <div>
+                    当前输入包含 {maskedInputCount} 张带蒙版的局部编辑参考图。提交时会按选区进行编辑。
+                  </div>
+                  {maskedInputCount > 1 && (
+                    <div className="mt-1 text-[11px] text-amber-700 dark:text-amber-300">
+                      当前仅支持 1 张带蒙版参考图参与提交，请先清理多余蒙版。
+                    </div>
+                  )}
+                </div>
+                {primaryMaskedInput && (
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (primaryMaskedInput) {
+                          reopenImageEditorFromInputImage(primaryMaskedInput)
+                        }
+                      }}
+                      className="rounded-full border border-emerald-300/80 bg-white/80 px-3 py-1.5 text-[11px] font-medium text-emerald-700 transition hover:bg-white dark:border-emerald-400/20 dark:bg-white/[0.06] dark:text-emerald-200 dark:hover:bg-white/[0.1]"
+                    >
+                      继续调整选区
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (primaryMaskedInputIndex >= 0) {
+                          clearInputImageEdit(primaryMaskedInputIndex)
+                        }
+                      }}
+                      className="rounded-full border border-emerald-300/60 px-3 py-1.5 text-[11px] font-medium text-emerald-700 transition hover:bg-emerald-100/80 dark:border-emerald-400/20 dark:text-emerald-200 dark:hover:bg-emerald-400/10"
+                    >
+                      清除蒙版
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {settings.apiProtocol === 'responses' && localInputImageCount > 0 && (
             <div className="mt-3 rounded-2xl border border-amber-200/80 bg-amber-50/80 px-4 py-3 text-xs text-amber-700 shadow-sm dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-300">
               {settings.responsesImageInputMode === 'file_id'
@@ -723,6 +783,9 @@ export default function InputBar() {
             </span>
             {activeCategoryFilter === ALL_CATEGORY_FILTER && (
               <span>当前位于全部分类视图，默认进入未分类。</span>
+            )}
+            {activeCategoryFilter === FAVORITES_CATEGORY_FILTER && (
+              <span>当前位于收藏视图，默认进入未分类，不会自动加入收藏。</span>
             )}
           </div>
 

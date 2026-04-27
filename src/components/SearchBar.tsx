@@ -8,6 +8,7 @@ import {
 } from '../store'
 import {
   ALL_CATEGORY_FILTER,
+  FAVORITES_CATEGORY_FILTER,
   UNCATEGORIZED_CATEGORY_FILTER,
   isTaskInRecycleBin,
   resolveCategoryFilterName,
@@ -43,6 +44,10 @@ export default function SearchBar() {
     [tasks],
   )
   const categoryIdSet = useMemo(() => new Set(categories.map((category) => category.id)), [categories])
+  const favoriteCount = useMemo(
+    () => activeGalleryTasks.filter((task) => Boolean(task.isFavorite)).length,
+    [activeGalleryTasks],
+  )
   const uncategorizedCount = useMemo(
     () =>
       activeGalleryTasks.filter(
@@ -66,7 +71,10 @@ export default function SearchBar() {
   const activeCategory = categories.find((category) => category.id === activeCategoryFilter) ?? null
   const activeCategoryLabel = resolveCategoryFilterName(activeCategoryFilter, categories)
   const generationTargetLabel =
-    activeCategoryFilter === ALL_CATEGORY_FILTER ? '未分类' : activeCategoryLabel
+    activeCategoryFilter === ALL_CATEGORY_FILTER ||
+    activeCategoryFilter === FAVORITES_CATEGORY_FILTER
+      ? '未分类'
+      : activeCategoryLabel
 
   useEffect(() => {
     if (taskView !== 'gallery') {
@@ -186,10 +194,11 @@ export default function SearchBar() {
 
       {taskView === 'gallery' && (
         <div className="rounded-2xl border border-gray-200/80 bg-white/80 px-4 py-3 backdrop-blur-sm dark:border-white/[0.08] dark:bg-gray-900/70">
-          <div className="flex flex-wrap gap-2">
-            {renderCategoryChip('全部', ALL_CATEGORY_FILTER, activeGalleryTasks.length)}
-            {renderCategoryChip('未分类', UNCATEGORIZED_CATEGORY_FILTER, uncategorizedCount)}
-            {categories.map((category) =>
+            <div className="flex flex-wrap gap-2">
+              {renderCategoryChip('全部', ALL_CATEGORY_FILTER, activeGalleryTasks.length)}
+              {renderCategoryChip('收藏', FAVORITES_CATEGORY_FILTER, favoriteCount)}
+              {renderCategoryChip('未分类', UNCATEGORIZED_CATEGORY_FILTER, uncategorizedCount)}
+              {categories.map((category) =>
               renderCategoryChip(
                 category.name,
                 category.id,

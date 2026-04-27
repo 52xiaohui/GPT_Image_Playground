@@ -235,7 +235,7 @@ export default function SizePickerModal({ currentSize, onSelect, onClose }: Prop
                     <svg className="mt-0.5 h-4 w-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                     </svg>
-                    <span>由于模型限制，最终输出将被自动规整到 16 的倍数。</span>
+                    <span>最终尺寸会同时满足 16 倍数、最长边 3840、长宽比不超过 3:1，并自动补齐到合法像素范围。</span>
                   </p>
                 </div>
               </div>

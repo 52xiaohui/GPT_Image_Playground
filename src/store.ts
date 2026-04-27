@@ -3,6 +3,8 @@ import { persist } from 'zustand/middleware'
 import type {
   AppSettings,
   CategoryConfig,
+  ImageEditSelection,
+  ImageEditSession,
   ProviderConfig,
   TaskParams,
   InputImage,
@@ -14,6 +16,7 @@ import {
   ALL_CATEGORY_FILTER,
   DEFAULT_SETTINGS,
   DEFAULT_PARAMS,
+  FAVORITES_CATEGORY_FILTER,
   UNCATEGORIZED_CATEGORY_FILTER,
   UNKNOWN_TASK_PROVIDER_NAME,
   isTaskInRecycleBin,
@@ -134,7 +137,7 @@ function normalizeCategoryList(categories: unknown): CategoryConfig[] {
   for (let index = 0; index < categories.length; index += 1) {
     const category = categories[index]
     if (!category || typeof category !== 'object') continue
-    const record = category as Partial<CategoryConfig>
+    const record = category as Partial<CategoryConfig> & Record<string, unknown>
     if (typeof record.id !== 'string' || !record.id.trim()) continue
     if (seen.has(record.id)) continue
 
@@ -142,6 +145,7 @@ function normalizeCategoryList(categories: unknown): CategoryConfig[] {
     if (!normalizedName) continue
 
     normalized.push({
+      ...record,
       id: record.id,
       name: normalizedName,
       createdAt:
@@ -155,11 +159,52 @@ function normalizeCategoryList(categories: unknown): CategoryConfig[] {
   return normalized
 }
 
+function mergeCategoriesFromTasks(
+  categories: CategoryConfig[],
+  tasks: Array<Pick<TaskRecord, 'categoryId' | 'categoryName' | 'createdAt'>>,
+): CategoryConfig[] {
+  const normalizedCategories = normalizeCategoryList(categories)
+  const seen = new Set(normalizedCategories.map((category) => category.id))
+  const derivedCategories: CategoryConfig[] = []
+  const sortedTasks = [...tasks].sort((a, b) => a.createdAt - b.createdAt)
+
+  for (const task of sortedTasks) {
+    const categoryId = typeof task.categoryId === 'string' ? task.categoryId.trim() : ''
+    const categoryName = typeof task.categoryName === 'string' ? normalizeCategoryName(task.categoryName) : ''
+    if (!categoryId || !categoryName || seen.has(categoryId)) continue
+
+    derivedCategories.push(
+      createCategoryConfig(
+        categoryName,
+        categoryId,
+        typeof task.createdAt === 'number' && Number.isFinite(task.createdAt) ? task.createdAt : Date.now(),
+      ),
+    )
+    seen.add(categoryId)
+  }
+
+  return derivedCategories.length > 0
+    ? [...normalizedCategories, ...derivedCategories]
+    : normalizedCategories
+}
+
+function getTaskReferencedImageIds(task: TaskRecord): string[] {
+  return [
+    ...(task.inputImageIds || []),
+    ...(task.outputImages || []),
+    ...(task.editMaskImageId ? [task.editMaskImageId] : []),
+  ]
+}
+
 function resolveActiveCategoryFilter(
   filter: unknown,
   categories: CategoryConfig[],
 ): string {
-  if (filter === ALL_CATEGORY_FILTER || filter === UNCATEGORIZED_CATEGORY_FILTER) {
+  if (
+    filter === ALL_CATEGORY_FILTER ||
+    filter === FAVORITES_CATEGORY_FILTER ||
+    filter === UNCATEGORIZED_CATEGORY_FILTER
+  ) {
     return filter
   }
 
@@ -228,21 +273,12 @@ function normalizeProviderList(providers: unknown): ProviderConfig[] {
   return providers
     .map((provider, index) => {
       if (!provider || typeof provider !== 'object') return null
-      const record = provider as Partial<ProviderConfig>
+      const record = provider as Partial<ProviderConfig> & Record<string, unknown>
+      const { id, name, ...settings } = record
       return createProviderConfig(
-        {
-          baseUrl: record.baseUrl,
-          apiKey: record.apiKey,
-          model: record.model,
-          responsesImageModel: record.responsesImageModel,
-          responsesTransport: record.responsesTransport,
-          responsesImageInputMode: record.responsesImageInputMode,
-          timeout: record.timeout,
-          apiProtocol: record.apiProtocol,
-          requestMode: record.requestMode,
-        },
-        typeof record.name === 'string' ? record.name : `供应商 ${index + 1}`,
-        typeof record.id === 'string' && record.id ? record.id : undefined,
+        settings as Partial<AppSettings>,
+        typeof name === 'string' ? name : `供应商 ${index + 1}`,
+        typeof id === 'string' && id ? id : undefined,
       )
     })
     .filter((provider): provider is ProviderConfig => provider !== null)
@@ -296,6 +332,8 @@ interface AppState {
   setTaskView: (view: TaskView) => void
 
   // UI
+  imageEditSession: ImageEditSession | null
+  setImageEditSession: (session: ImageEditSession | null) => void
   detailTaskId: string | null
   setDetailTaskId: (id: string | null) => void
   lightboxImageId: string | null
@@ -316,6 +354,30 @@ interface AppState {
     action: () => void
   } | null
   setConfirmDialog: (d: AppState['confirmDialog']) => void
+}
+
+type PersistedAppStateSnapshot = Partial<
+  Pick<
+    AppState,
+    'settings' | 'providers' | 'activeProviderId' | 'categories' | 'activeCategoryFilter' | 'params'
+  >
+> &
+  Record<string, unknown>
+
+function buildPersistedAppStateSnapshot(state: AppState): PersistedAppStateSnapshot {
+  return {
+    settings: state.settings,
+    providers: state.providers,
+    activeProviderId: state.activeProviderId,
+    categories: state.categories,
+    activeCategoryFilter: state.activeCategoryFilter,
+    params: state.params,
+  }
+}
+
+function readPersistedAppStateSnapshot(input: unknown): PersistedAppStateSnapshot | null {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null
+  return input as PersistedAppStateSnapshot
 }
 
 export const useStore = create<AppState>()(
@@ -427,6 +489,10 @@ export const useStore = create<AppState>()(
           return {
             tasks,
             selectedTaskIds: state.selectedTaskIds.filter((id) => taskIds.has(id)),
+            imageEditSession:
+              state.imageEditSession && taskIds.has(state.imageEditSession.taskId)
+                ? state.imageEditSession
+                : null,
             detailTaskId:
               state.detailTaskId && taskIds.has(state.detailTaskId) ? state.detailTaskId : null,
           }
@@ -476,10 +542,13 @@ export const useStore = create<AppState>()(
         set({
           taskView,
           selectedTaskIds: [],
+          imageEditSession: null,
           detailTaskId: null,
         }),
 
       // UI
+      imageEditSession: null,
+      setImageEditSession: (imageEditSession) => set({ imageEditSession }),
       detailTaskId: null,
       setDetailTaskId: (detailTaskId) => set({ detailTaskId }),
       lightboxImageId: null,
@@ -504,14 +573,7 @@ export const useStore = create<AppState>()(
     }),
     {
       name: 'gpt-image-playground',
-      partialize: (state) => ({
-        settings: state.settings,
-        providers: state.providers,
-        activeProviderId: state.activeProviderId,
-        categories: state.categories,
-        activeCategoryFilter: state.activeCategoryFilter,
-        params: state.params,
-      }),
+      partialize: (state) => buildPersistedAppStateSnapshot(state),
       merge: (persistedState, currentState) => {
         const persisted = persistedState as Partial<AppState> | undefined
         const normalizedProviders = normalizeProviderList(persisted?.providers)
@@ -566,6 +628,7 @@ function genId(): string {
 export async function initStore() {
   const tasks = await getAllTasks()
   useStore.getState().setTasks(tasks)
+  repairCategoryStateFromTasks(tasks)
 
   // 图片改为按需懒加载，避免启动时把整个图库都塞进内存，拖慢画廊首屏。
   window.setTimeout(() => {
@@ -577,8 +640,7 @@ async function cleanupOrphanImages(tasks: TaskRecord[]) {
   // 收集所有任务引用的图片 id
   const referencedIds = new Set<string>()
   for (const t of tasks) {
-    for (const id of t.inputImageIds || []) referencedIds.add(id)
-    for (const id of t.outputImages || []) referencedIds.add(id)
+    for (const id of getTaskReferencedImageIds(t)) referencedIds.add(id)
   }
 
   // 仅清理孤立图片，不再预加载所有图片数据到内存缓存。
@@ -618,10 +680,20 @@ export async function submitTask() {
     return
   }
 
+  const maskedInputs = inputImages.filter((img) => Boolean(img.maskDataUrl))
+  if (maskedInputs.length > 1) {
+    showToast('当前仅支持 1 张带蒙版的局部编辑参考图，请先清理多余蒙版后再提交', 'error')
+    return
+  }
+
   // 持久化输入图片到 IndexedDB（此前只在内存缓存中）
   for (const img of inputImages) {
     await storeImage(img.dataUrl)
   }
+  const maskedInput = maskedInputs[0]
+  const editMaskImageId = maskedInput?.maskDataUrl
+    ? await storeImage(maskedInput.maskDataUrl, 'upload')
+    : null
 
   const normalizedParams = {
     ...params,
@@ -635,6 +707,7 @@ export async function submitTask() {
   const selectedProvider = findProviderById(providers, activeProviderId)
   const selectedCategory =
     activeCategoryFilter !== ALL_CATEGORY_FILTER &&
+    activeCategoryFilter !== FAVORITES_CATEGORY_FILTER &&
     activeCategoryFilter !== UNCATEGORIZED_CATEGORY_FILTER
       ? findCategoryById(categories, activeCategoryFilter)
       : undefined
@@ -646,9 +719,13 @@ export async function submitTask() {
     categoryId: selectedCategory?.id ?? null,
     categoryName: selectedCategory?.name ?? null,
     deletedAt: null,
+    isFavorite: false,
     prompt: prompt.trim(),
     params: normalizedParams,
     inputImageIds: inputImages.map((i) => i.id),
+    editMaskImageId,
+    editSourceImageId: maskedInput?.sourceImageId ?? maskedInput?.id ?? null,
+    editSelection: maskedInput?.editSelection ?? null,
     outputImages: [],
     status: 'running',
     error: null,
@@ -681,12 +758,19 @@ async function executeTask(taskId: string, requestSettings?: AppSettings) {
       const dataUrl = await ensureImageCached(imgId)
       if (dataUrl) inputDataUrls.push(dataUrl)
     }
+    const editMaskDataUrl = task.editMaskImageId
+      ? await ensureImageCached(task.editMaskImageId)
+      : undefined
+    if (task.editMaskImageId && !editMaskDataUrl) {
+      throw new Error('局部编辑蒙版缺失，请重新选择编辑区域后再试')
+    }
 
     const result = await callImageApi({
       settings: providerSettings,
       prompt: task.prompt,
       params: task.params,
       inputImageDataUrls: inputDataUrls,
+      editMaskDataUrl,
     })
 
     // 存储输出图片
@@ -735,10 +819,11 @@ function updateTaskInStore(taskId: string, patch: Partial<TaskRecord>) {
 function collectReferencedImageIds(tasks: TaskRecord[], inputImages: InputImage[]): Set<string> {
   const referenced = new Set<string>()
   for (const task of tasks) {
-    for (const id of task.inputImageIds || []) referenced.add(id)
-    for (const id of task.outputImages || []) referenced.add(id)
+    for (const id of getTaskReferencedImageIds(task)) referenced.add(id)
   }
-  for (const img of inputImages) referenced.add(img.id)
+  for (const img of inputImages) {
+    referenced.add(img.id)
+  }
   return referenced
 }
 
@@ -747,6 +832,67 @@ function clearTaskUiState(taskIds: Set<string>) {
     selectedTaskIds: state.selectedTaskIds.filter((id) => !taskIds.has(id)),
     detailTaskId:
       state.detailTaskId && taskIds.has(state.detailTaskId) ? null : state.detailTaskId,
+  }))
+}
+
+function repairCategoryStateFromTasks(tasks: TaskRecord[]) {
+  const { categories, activeCategoryFilter } = useStore.getState()
+  const nextCategories = mergeCategoriesFromTasks(categories, tasks)
+  const hasChanged =
+    nextCategories.length !== categories.length ||
+    nextCategories.some(
+      (category, index) =>
+        categories[index]?.id !== category.id ||
+        categories[index]?.name !== category.name ||
+        categories[index]?.createdAt !== category.createdAt,
+    )
+
+  if (!hasChanged) return
+
+  useStore.setState({
+    categories: nextCategories,
+    activeCategoryFilter: resolveActiveCategoryFilter(activeCategoryFilter, nextCategories),
+  })
+}
+
+function applyPersistedAppStateSnapshot(snapshot: PersistedAppStateSnapshot) {
+  const normalizedProviders = normalizeProviderList(snapshot.providers)
+  const providerState =
+    normalizedProviders.length > 0
+      ? (() => {
+          const activeProvider =
+            normalizedProviders.find((provider) => provider.id === snapshot.activeProviderId) ??
+            normalizedProviders[0]
+
+          return {
+            providers: normalizedProviders,
+            activeProviderId: activeProvider.id,
+            settings: getProviderSettings(activeProvider),
+          }
+        })()
+      : createInitialProviderState(
+          snapshot.settings && typeof snapshot.settings === 'object'
+            ? (snapshot.settings as Partial<AppSettings>)
+            : DEFAULT_SETTINGS,
+        )
+  const normalizedCategories = normalizeCategoryList(snapshot.categories)
+  const nextParams =
+    snapshot.params && typeof snapshot.params === 'object'
+      ? (snapshot.params as Partial<TaskParams>)
+      : undefined
+
+  useStore.setState((state) => ({
+    ...state,
+    ...snapshot,
+    settings: providerState.settings,
+    providers: providerState.providers,
+    activeProviderId: providerState.activeProviderId,
+    categories: normalizedCategories,
+    activeCategoryFilter: resolveActiveCategoryFilter(
+      snapshot.activeCategoryFilter,
+      normalizedCategories,
+    ),
+    params: nextParams ? { ...state.params, ...nextParams } : state.params,
   }))
 }
 
@@ -926,8 +1072,7 @@ async function purgeTasksPermanently(
 
   const taskImageIds = new Set<string>()
   for (const task of matchedTasks) {
-    for (const id of task.inputImageIds || []) taskImageIds.add(id)
-    for (const id of task.outputImages || []) taskImageIds.add(id)
+    for (const id of getTaskReferencedImageIds(task)) taskImageIds.add(id)
   }
 
   const remainingStoreTasks = tasks.filter((task) => !taskIdsToRemove.has(task.id))
@@ -990,6 +1135,29 @@ export function startRecycleBinJanitor() {
   }
 }
 
+async function buildInputImagesFromTask(task: TaskRecord): Promise<InputImage[]> {
+  const maskDataUrl = task.editMaskImageId ? await ensureImageCached(task.editMaskImageId) : null
+  const imgs: InputImage[] = []
+
+  for (const imgId of task.inputImageIds) {
+    const dataUrl = await ensureImageCached(imgId)
+    if (!dataUrl) continue
+
+    const isEditSourceImage =
+      Boolean(maskDataUrl) && (task.editSourceImageId ? task.editSourceImageId === imgId : task.inputImageIds[0] === imgId)
+    imgs.push({
+      id: imgId,
+      dataUrl,
+      maskDataUrl: isEditSourceImage ? maskDataUrl : null,
+      editSelection: isEditSourceImage ? task.editSelection ?? null : null,
+      sourceTaskId: isEditSourceImage ? task.id : null,
+      sourceImageId: isEditSourceImage ? task.editSourceImageId ?? imgId : null,
+    })
+  }
+
+  return imgs
+}
+
 /** 复用配置 */
 export async function reuseConfig(task: TaskRecord) {
   const { providers, setActiveProvider, setPrompt, setParams, setInputImages, showToast } =
@@ -1003,33 +1171,189 @@ export async function reuseConfig(task: TaskRecord) {
   setPrompt(task.prompt)
   setParams(task.params)
 
-  // 恢复输入图片
-  const imgs: InputImage[] = []
-  for (const imgId of task.inputImageIds) {
-    const dataUrl = await ensureImageCached(imgId)
-    if (dataUrl) {
-      imgs.push({ id: imgId, dataUrl })
-    }
-  }
-  setInputImages(imgs)
+  setInputImages(await buildInputImagesFromTask(task))
   showToast('已复用配置到输入框', 'success')
 }
 
-/** 编辑输出：将输出图加入输入 */
-export async function editOutputs(task: TaskRecord) {
-  const { inputImages, addInputImage, showToast } = useStore.getState()
-  if (!task.outputImages?.length) return
+export async function setTasksFavorite(tasksToUpdate: TaskRecord[], isFavorite: boolean) {
+  const { tasks, setTasks, showToast } = useStore.getState()
+  if (!tasksToUpdate.length) return 0
 
-  let added = 0
-  for (const imgId of task.outputImages) {
-    if (inputImages.find((i) => i.id === imgId)) continue
-    const dataUrl = await ensureImageCached(imgId)
-    if (dataUrl) {
-      addInputImage({ id: imgId, dataUrl })
-      added++
-    }
+  const taskIds = new Set(tasksToUpdate.map((task) => task.id))
+  const matchedTasks = tasks.filter((task) => taskIds.has(task.id))
+  const changedTasks = matchedTasks.filter((task) => Boolean(task.isFavorite) !== isFavorite)
+  if (!changedTasks.length) {
+    showToast(isFavorite ? '所选记录已在收藏中' : '所选记录已取消收藏', 'info')
+    return 0
   }
-  showToast(`已添加 ${added} 张输出图到输入`, 'success')
+
+  const changedTaskIds = new Set(changedTasks.map((task) => task.id))
+  const nextTasks = tasks.map((task) =>
+    changedTaskIds.has(task.id)
+      ? {
+          ...task,
+          isFavorite,
+        }
+      : task,
+  )
+
+  setTasks(nextTasks)
+  await Promise.all(
+    changedTasks.map((task) =>
+      putTask({
+        ...task,
+        isFavorite,
+      }),
+    ),
+  )
+
+  showToast(
+    isFavorite
+      ? `已收藏 ${changedTasks.length} 条记录`
+      : `已取消收藏 ${changedTasks.length} 条记录`,
+    'success',
+  )
+  return changedTasks.length
+}
+
+export async function toggleTaskFavorite(task: TaskRecord) {
+  return setTasksFavorite([task], !task.isFavorite)
+}
+
+/** 编辑输出：打开局部编辑器 */
+export async function editOutputs(task: TaskRecord, preferredImageId?: string) {
+  const { setImageEditSession, showToast } = useStore.getState()
+  const sourceImageId =
+    preferredImageId && task.outputImages.includes(preferredImageId)
+      ? preferredImageId
+      : task.outputImages?.[0]
+  if (!sourceImageId) return
+
+  const sourceImageDataUrl = await ensureImageCached(sourceImageId)
+  if (!sourceImageDataUrl) {
+    showToast('输出图读取失败，无法进入编辑器', 'error')
+    return
+  }
+
+  setImageEditSession({
+    taskId: task.id,
+    providerId: task.providerId ?? null,
+    sourceImageId,
+    sourceImageDataUrl,
+    prompt: task.prompt,
+    params: task.params,
+    initialSelection: task.editSelection ?? null,
+  })
+}
+
+export function reopenImageEditorFromInputImage(inputImage: InputImage) {
+  const { activeProviderId, prompt, params, tasks, setImageEditSession, showToast } =
+    useStore.getState()
+
+  if (!inputImage.dataUrl) {
+    showToast('当前参考图不可用，无法重新打开编辑器', 'error')
+    return
+  }
+
+  const sourceTask = inputImage.sourceTaskId
+    ? tasks.find((task) => task.id === inputImage.sourceTaskId)
+    : null
+
+  setImageEditSession({
+    taskId: inputImage.sourceTaskId ?? 'input-image',
+    providerId: sourceTask?.providerId ?? activeProviderId ?? null,
+    sourceImageId: inputImage.sourceImageId ?? inputImage.id,
+    sourceImageDataUrl: inputImage.dataUrl,
+    prompt: sourceTask?.prompt ?? prompt.trim(),
+    params: sourceTask?.params ?? params,
+    initialSelection: inputImage.editSelection ?? null,
+  })
+}
+
+export function closeImageEditor() {
+  useStore.getState().setImageEditSession(null)
+}
+
+export function clearInputImageEdit(index: number) {
+  const { inputImages, setInputImages, showToast } = useStore.getState()
+  const targetImage = inputImages[index]
+  if (!targetImage) return
+
+  if (!targetImage.maskDataUrl && !targetImage.editSelection) {
+    showToast('这张参考图当前没有局部编辑蒙版', 'info')
+    return
+  }
+
+  setInputImages(
+    inputImages.map((image, imageIndex) =>
+      imageIndex === index
+        ? {
+            ...image,
+            maskDataUrl: null,
+            editSelection: null,
+          }
+        : image,
+    ),
+  )
+  showToast('已移除该参考图的局部编辑区域', 'success')
+}
+
+export async function applyImageEditToInput(options: {
+  session: ImageEditSession
+  prompt: string
+  providerId?: string | null
+  maskDataUrl?: string | null
+  selection?: ImageEditSelection | null
+  sourceSize?: string
+  submit?: boolean
+}) {
+  const {
+    providers,
+    setActiveProvider,
+    setPrompt,
+    setParams,
+    setInputImages,
+    setImageEditSession,
+    showToast,
+  } = useStore.getState()
+
+  const provider = findProviderById(providers, options.providerId ?? options.session.providerId)
+  if (provider) {
+    setActiveProvider(provider.id)
+  }
+
+  setPrompt(options.prompt.trim())
+  setParams({
+    ...options.session.params,
+    size: options.sourceSize
+      ? normalizeImageSize(options.sourceSize) || options.session.params.size
+      : options.session.params.size,
+  })
+  setInputImages([
+    {
+      id: options.session.sourceImageId,
+      dataUrl: options.session.sourceImageDataUrl,
+      maskDataUrl: options.maskDataUrl ?? null,
+      editSelection: options.selection ?? null,
+      sourceTaskId: options.session.taskId,
+      sourceImageId: options.session.sourceImageId,
+    },
+  ])
+  setImageEditSession(null)
+  showToast(
+    options.submit
+      ? options.maskDataUrl
+        ? '已写入输入区，正在提交局部编辑任务'
+        : '已写入输入区，正在提交整图编辑任务'
+      : options.maskDataUrl
+        ? '已写入局部编辑输入区'
+        : '已写入整图编辑输入区',
+    'success',
+  )
+
+  if (options.submit) {
+    await submitTask()
+  }
 }
 
 /** 批量移入回收站 */
@@ -1124,6 +1448,7 @@ export async function clearAllData() {
     replaceCategoryState,
     setParams,
     setTaskView,
+    setImageEditSession,
     showToast,
   } = useStore.getState()
   setTasks([])
@@ -1132,6 +1457,7 @@ export async function clearAllData() {
   replaceCategoryState([])
   setParams({ ...DEFAULT_PARAMS })
   setTaskView('gallery')
+  setImageEditSession(null)
   showToast('所有数据已清空', 'success')
 }
 
@@ -1161,13 +1487,12 @@ export async function exportData() {
   try {
     const tasks = await getAllTasks()
     const images = await getAllImages()
-    const { settings, providers, activeProviderId, categories, activeCategoryFilter } =
-      useStore.getState()
+    const appStateSnapshot = buildPersistedAppStateSnapshot(useStore.getState())
     const exportedAt = Date.now()
     const imageCreatedAtFallback = new Map<string, number>()
 
     for (const task of tasks) {
-      for (const id of [...(task.inputImageIds || []), ...(task.outputImages || [])]) {
+      for (const id of getTaskReferencedImageIds(task)) {
         const prev = imageCreatedAtFallback.get(id)
         if (prev == null || task.createdAt < prev) {
           imageCreatedAtFallback.set(id, task.createdAt)
@@ -1194,11 +1519,13 @@ export async function exportData() {
     const manifest: ExportData = {
       version: 4,
       exportedAt: new Date(exportedAt).toISOString(),
-      settings,
-      providers,
-      activeProviderId,
-      categories,
-      activeCategoryFilter,
+      settings: appStateSnapshot.settings as AppSettings,
+      providers: appStateSnapshot.providers as ProviderConfig[] | undefined,
+      activeProviderId: appStateSnapshot.activeProviderId as string | undefined,
+      categories: appStateSnapshot.categories as CategoryConfig[] | undefined,
+      activeCategoryFilter: appStateSnapshot.activeCategoryFilter as string | undefined,
+      params: appStateSnapshot.params as TaskParams | undefined,
+      persistedState: appStateSnapshot,
       tasks,
       imageFiles,
     }
@@ -1256,20 +1583,29 @@ export async function importData(file: File) {
       await putTask(task)
     }
 
-    if (Array.isArray(data.providers) && data.providers.length > 0) {
-      useStore.getState().replaceProviderState(data.providers, data.activeProviderId)
-    } else if (data.settings) {
-      useStore.getState().replaceProviderState(
-        [createProviderConfig(data.settings, DEFAULT_PROVIDER_NAME)],
-        undefined,
-      )
+    const persistedStateSnapshot = readPersistedAppStateSnapshot(data.persistedState)
+    if (persistedStateSnapshot) {
+      applyPersistedAppStateSnapshot(persistedStateSnapshot)
+    } else {
+      if (Array.isArray(data.providers) && data.providers.length > 0) {
+        useStore.getState().replaceProviderState(data.providers, data.activeProviderId)
+      } else if (data.settings) {
+        useStore.getState().replaceProviderState(
+          [createProviderConfig(data.settings, DEFAULT_PROVIDER_NAME)],
+          undefined,
+        )
+      }
+      useStore
+        .getState()
+        .replaceCategoryState(data.categories ?? [], data.activeCategoryFilter)
+      if (data.params) {
+        useStore.getState().setParams(data.params)
+      }
     }
-    useStore
-      .getState()
-      .replaceCategoryState(data.categories ?? [], data.activeCategoryFilter)
 
     const tasks = await getAllTasks()
     useStore.getState().setTasks(tasks)
+    repairCategoryStateFromTasks(tasks)
     useStore
       .getState()
       .showToast(`已导入 ${data.tasks.length} 条记录`, 'success')

@@ -171,6 +171,8 @@ export interface CallApiOptions {
   params: TaskParams
   /** 输入图片的 data URL 列表 */
   inputImageDataUrls: string[]
+  /** 局部编辑蒙版 data URL。存在时会按蒙版编辑模式组包 */
+  editMaskDataUrl?: string
 }
 
 export interface CallApiResult {
@@ -416,6 +418,11 @@ interface ResponsesInputImage {
   file_id?: string
 }
 
+interface ResponsesInputImageMask {
+  image_url?: string
+  file_id?: string
+}
+
 type ResponsesInputContent =
   | {
       type: 'input_text'
@@ -574,7 +581,7 @@ async function callImagesApi(
   opts: CallApiOptions,
   ctx: SharedRequestContext,
 ): Promise<CallApiResult> {
-  const { settings, prompt, params, inputImageDataUrls } = opts
+  const { settings, prompt, params, inputImageDataUrls, editMaskDataUrl } = opts
   const isEdit = inputImageDataUrls.length > 0
   let response: Response
 
@@ -596,6 +603,10 @@ async function callImagesApi(
       const blob = await dataUrlToBlob(dataUrl)
       const ext = blob.type.split('/')[1] || 'png'
       formData.append('image[]', blob, `input-${i + 1}.${ext}`)
+    }
+    if (editMaskDataUrl) {
+      const maskBlob = await dataUrlToBlob(editMaskDataUrl)
+      formData.append('mask', maskBlob, 'mask.png')
     }
 
     response = await fetch(buildRequestUrl(settings.baseUrl, 'images/edits', ctx), {
@@ -697,6 +708,9 @@ async function prepareResponsesInputImages(
   inputImageDataUrls: string[],
   imageInputMode: ResponsesImageInputMode,
   ctx: SharedRequestContext,
+  options?: {
+    preserveOriginalIndices?: Set<number>
+  },
 ): Promise<{ inputImages: ResponsesInputImage[]; uploadedFileIds: string[] }> {
   if (!inputImageDataUrls.length) {
     return { inputImages: [], uploadedFileIds: [] }
@@ -754,7 +768,10 @@ async function prepareResponsesInputImages(
 
       // Responses API 支持把 data URL 直接作为 input_image.image_url 传入，
       // 这样可避免依赖部分中转站未实现的 /v1/files。
-      const optimizedDataUrl = await shrinkDataUrlForResponses(inputImage, inlineImageTargetBytes)
+      const optimizedDataUrl =
+        options?.preserveOriginalIndices?.has(i)
+          ? inputImage
+          : await shrinkDataUrlForResponses(inputImage, inlineImageTargetBytes)
       inputImages.push({
         type: 'input_image',
         image_url: optimizedDataUrl,
@@ -768,6 +785,45 @@ async function prepareResponsesInputImages(
   }
 
   return { inputImages, uploadedFileIds }
+}
+
+async function prepareResponsesEditMask(
+  baseUrl: string,
+  maskDataUrl: string | undefined,
+  imageInputMode: ResponsesImageInputMode,
+  ctx: SharedRequestContext,
+): Promise<{ editMask?: ResponsesInputImageMask; uploadedFileIds: string[] }> {
+  if (!maskDataUrl) {
+    return { editMask: undefined, uploadedFileIds: [] }
+  }
+
+  if (imageInputMode === 'file_id') {
+    try {
+      const fileId = await uploadInputImageAsFileId(baseUrl, maskDataUrl, 999, ctx)
+      return {
+        editMask: { file_id: fileId },
+        uploadedFileIds: [fileId],
+      }
+    } catch (error) {
+      const status = (error as ApiError | undefined)?.status
+      const message = error instanceof Error ? error.message : String(error)
+      if (
+        (status != null && [400, 404, 405, 415, 422, 501].includes(status)) ||
+        /(?:\/v1\/files|multipart|file upload|file_id|vision|unsupported|not implemented)/i.test(message)
+      ) {
+        throw createApiError(
+          '当前中转站不支持 Responses 蒙版 file_id 上传，请把“Responses 参考图输入”改回“自动”后重试。',
+          status,
+        )
+      }
+      throw error
+    }
+  }
+
+  return {
+    editMask: { image_url: maskDataUrl },
+    uploadedFileIds: [],
+  }
 }
 
 function buildResponsesInput(prompt: string, inputImages: ResponsesInputImage[]) {
@@ -813,8 +869,13 @@ function buildResponsesRequestPlans(
   inputImages: ResponsesInputImage[],
 ): ResponsesRequestPlan[] {
   const hasReferenceImages = inputImages.length > 0
+  const hasEditMask = Boolean(opts.editMaskDataUrl)
   const defaultInputPayloadMode: ResponsesInputPayloadMode = hasReferenceImages ? 'message-list' : 'compact-string'
   const transports = getPreferredResponsesTransports(opts.settings)
+  const primaryTransports: ResponsesTransportKind[] =
+    hasEditMask && getResponsesTransportMode(opts.settings) === 'auto'
+      ? ['json', 'stream']
+      : transports
   const allowJsonCompatibilityFallback = getResponsesTransportMode(opts.settings) === 'auto'
   const compatibilityTransports: ResponsesTransportKind[] = allowJsonCompatibilityFallback ? ['json'] : transports
   const plans: ResponsesRequestPlan[] = []
@@ -825,17 +886,17 @@ function buildResponsesRequestPlans(
     }
   }
 
-  for (const transport of transports) {
+  for (const transport of primaryTransports) {
     pushPlan({
       id: `official-${transport}-${defaultInputPayloadMode}`,
       inputPayloadMode: defaultInputPayloadMode,
       transport,
-      actionMode: 'auto',
-      toolChoiceMode: 'omit',
+      actionMode: hasEditMask ? 'explicit' : 'auto',
+      toolChoiceMode: hasEditMask ? 'force' : 'omit',
     })
   }
 
-  if (hasReferenceImages) {
+  if (hasReferenceImages && !hasEditMask) {
     for (const transport of compatibilityTransports) {
       pushPlan({
         id: `explicit-action-${transport}`,
@@ -859,14 +920,16 @@ function buildResponsesRequestPlans(
     }
   }
 
-  for (const transport of compatibilityTransports) {
-    pushPlan({
-      id: `forced-tool-${transport}-${defaultInputPayloadMode}`,
-      inputPayloadMode: defaultInputPayloadMode,
-      transport,
-      actionMode: hasReferenceImages ? 'explicit' : 'auto',
-      toolChoiceMode: 'force',
-    })
+  if (!hasEditMask) {
+    for (const transport of compatibilityTransports) {
+      pushPlan({
+        id: `forced-tool-${transport}-${defaultInputPayloadMode}`,
+        inputPayloadMode: defaultInputPayloadMode,
+        transport,
+        actionMode: hasReferenceImages ? 'explicit' : 'auto',
+        toolChoiceMode: 'force',
+      })
+    }
   }
 
   return plans
@@ -875,6 +938,7 @@ function buildResponsesRequestPlans(
 function buildResponsesBody(
   opts: CallApiOptions,
   inputImages: ResponsesInputImage[],
+  editMask: ResponsesInputImageMask | undefined,
   plan: ResponsesRequestPlan,
 ): Record<string, unknown> {
   const { settings, prompt, params } = opts
@@ -898,6 +962,9 @@ function buildResponsesBody(
   }
   if (params.output_format !== 'png' && params.output_compression != null) {
     tool.output_compression = params.output_compression
+  }
+  if (editMask) {
+    tool.input_image_mask = editMask
   }
   if (plan.actionMode === 'explicit') {
     tool.action = hasReferenceImages ? 'edit' : 'generate'
@@ -935,7 +1002,15 @@ async function callResponsesApi(
     opts.inputImageDataUrls,
     responsesImageInputMode,
     ctx,
+    opts.editMaskDataUrl ? { preserveOriginalIndices: new Set([0]) } : undefined,
   )
+  const { editMask, uploadedFileIds: uploadedMaskFileIds } = await prepareResponsesEditMask(
+    opts.settings.baseUrl,
+    opts.editMaskDataUrl,
+    responsesImageInputMode,
+    ctx,
+  )
+  const allUploadedFileIds = [...uploadedFileIds, ...uploadedMaskFileIds]
   const requestPlans = buildResponsesRequestPlans(opts, inputImages)
 
   try {
@@ -954,7 +1029,7 @@ async function callResponsesApi(
               'Content-Type': 'application/json',
             },
             cache: 'no-store',
-            body: JSON.stringify(buildResponsesBody(opts, inputImages, plan)),
+            body: JSON.stringify(buildResponsesBody(opts, inputImages, editMask, plan)),
             signal: ctx.controller.signal,
           })
 
@@ -989,7 +1064,7 @@ async function callResponsesApi(
       }
     }
   } finally {
-    await Promise.all(uploadedFileIds.map((fileId) => deleteUploadedFile(opts.settings.baseUrl, fileId, ctx)))
+    await Promise.all(allUploadedFileIds.map((fileId) => deleteUploadedFile(opts.settings.baseUrl, fileId, ctx)))
   }
 
   if (!images.length) {

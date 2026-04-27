@@ -5,6 +5,7 @@ import {
   ensureImageCached,
   reuseConfig,
   editOutputs,
+  toggleTaskFavorite,
   removeTask,
   restoreTask,
 } from '../store'
@@ -126,6 +127,7 @@ export default function DetailModal() {
   const categoryName = resolveTaskCategoryName(task, categories)
   const inRecycleBin = isTaskInRecycleBin(task)
   const cleanupDueAt = inRecycleBin ? (task.deletedAt ?? 0) + RECYCLE_BIN_RETENTION_MS : null
+  const isFavorite = Boolean(task.isFavorite)
 
   const formatTime = (ts: number | null) => {
     if (!ts) return ''
@@ -146,8 +148,12 @@ export default function DetailModal() {
   }
 
   const handleEdit = () => {
-    editOutputs(task)
+    editOutputs(task, currentOutputImageId || task.outputImages?.[0])
     setDetailTaskId(null)
+  }
+
+  const handleToggleFavorite = () => {
+    void toggleTaskFavorite(task)
   }
 
   const handleDelete = () => {
@@ -364,6 +370,22 @@ export default function DetailModal() {
               <h3 className="text-xs font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider">
                 输入内容
               </h3>
+              {!inRecycleBin && (
+                <button
+                  onClick={handleToggleFavorite}
+                  className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] transition ${
+                    isFavorite
+                      ? 'bg-amber-50 text-amber-600 dark:bg-amber-500/10 dark:text-amber-300'
+                      : 'bg-gray-100 text-gray-500 hover:bg-amber-50 hover:text-amber-600 dark:bg-white/[0.04] dark:text-gray-400 dark:hover:bg-amber-500/10 dark:hover:text-amber-300'
+                  }`}
+                  title={isFavorite ? '取消收藏' : '加入收藏'}
+                >
+                  <svg className="h-3.5 w-3.5" fill={isFavorite ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="m11.049 2.927 2.037 4.128 4.556.663-3.297 3.213.778 4.538L11.05 13.33 6.978 15.47l.778-4.538-3.297-3.213 4.556-.663 2.034-4.128Z" />
+                  </svg>
+                  {isFavorite ? '已收藏' : '收藏'}
+                </button>
+              )}
               {task.prompt && (
                 <button
                   onClick={handleCopyPrompt}
@@ -425,6 +447,11 @@ export default function DetailModal() {
                 <span className="text-gray-400 dark:text-gray-500">分类</span>
                 <br />
                 <span className="text-gray-700 dark:text-gray-300 font-medium break-all">{categoryName}</span>
+              </div>
+              <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2">
+                <span className="text-gray-400 dark:text-gray-500">收藏</span>
+                <br />
+                <span className="text-gray-700 dark:text-gray-300 font-medium">{isFavorite ? '已收藏' : '未收藏'}</span>
               </div>
               <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2">
                 <span className="text-gray-400 dark:text-gray-500">供应商</span>
