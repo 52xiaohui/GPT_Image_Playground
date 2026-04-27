@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import type {
   AppSettings,
+  CategoryConfig,
   ProviderConfig,
   TaskParams,
   InputImage,
@@ -10,8 +11,10 @@ import type {
   TaskView,
 } from './types'
 import {
+  ALL_CATEGORY_FILTER,
   DEFAULT_SETTINGS,
   DEFAULT_PARAMS,
+  UNCATEGORIZED_CATEGORY_FILTER,
   UNKNOWN_TASK_PROVIDER_NAME,
   isTaskInRecycleBin,
 } from './types'
@@ -76,6 +79,10 @@ function genProviderId(): string {
   return `provider-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 }
 
+function genCategoryId(): string {
+  return `category-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+}
+
 function getProviderSettings(provider: ProviderConfig): AppSettings {
   const { id, name, ...settings } = provider
   return settings
@@ -87,6 +94,102 @@ function findProviderById(
 ): ProviderConfig | undefined {
   if (!providerId) return undefined
   return providers.find((provider) => provider.id === providerId)
+}
+
+function findCategoryById(
+  categories: CategoryConfig[],
+  categoryId: string | null | undefined,
+): CategoryConfig | undefined {
+  if (!categoryId) return undefined
+  return categories.find((category) => category.id === categoryId)
+}
+
+function normalizeCategoryName(name: string): string {
+  return name.trim()
+}
+
+function createCategoryConfig(
+  name: string,
+  id = genCategoryId(),
+  createdAt = Date.now(),
+): CategoryConfig {
+  const normalizedName = normalizeCategoryName(name)
+  if (!normalizedName) {
+    throw new Error('分类名称不能为空')
+  }
+
+  return {
+    id,
+    name: normalizedName,
+    createdAt,
+  }
+}
+
+function normalizeCategoryList(categories: unknown): CategoryConfig[] {
+  if (!Array.isArray(categories)) return []
+
+  const seen = new Set<string>()
+  const normalized: CategoryConfig[] = []
+
+  for (let index = 0; index < categories.length; index += 1) {
+    const category = categories[index]
+    if (!category || typeof category !== 'object') continue
+    const record = category as Partial<CategoryConfig>
+    if (typeof record.id !== 'string' || !record.id.trim()) continue
+    if (seen.has(record.id)) continue
+
+    const normalizedName = normalizeCategoryName(typeof record.name === 'string' ? record.name : '')
+    if (!normalizedName) continue
+
+    normalized.push({
+      id: record.id,
+      name: normalizedName,
+      createdAt:
+        typeof record.createdAt === 'number' && Number.isFinite(record.createdAt)
+          ? record.createdAt
+          : Date.now() + index,
+    })
+    seen.add(record.id)
+  }
+
+  return normalized
+}
+
+function resolveActiveCategoryFilter(
+  filter: unknown,
+  categories: CategoryConfig[],
+): string {
+  if (filter === ALL_CATEGORY_FILTER || filter === UNCATEGORIZED_CATEGORY_FILTER) {
+    return filter
+  }
+
+  if (typeof filter === 'string' && categories.some((category) => category.id === filter)) {
+    return filter
+  }
+
+  return ALL_CATEGORY_FILTER
+}
+
+function ensureCategoryNameAvailable(
+  categories: CategoryConfig[],
+  name: string,
+  excludeId?: string,
+): string {
+  const normalizedName = normalizeCategoryName(name)
+  if (!normalizedName) {
+    throw new Error('分类名称不能为空')
+  }
+
+  const normalizedLower = normalizedName.toLocaleLowerCase()
+  const exists = categories.some(
+    (category) =>
+      category.id !== excludeId && category.name.trim().toLocaleLowerCase() === normalizedLower,
+  )
+  if (exists) {
+    throw new Error('分类名称已存在')
+  }
+
+  return normalizedName
 }
 
 function createProviderConfig(
@@ -179,6 +282,10 @@ interface AppState {
   clearSelectedTasks: () => void
 
   // 搜索和筛选
+  categories: CategoryConfig[]
+  activeCategoryFilter: string
+  setActiveCategoryFilter: (filter: string) => void
+  replaceCategoryState: (categories: CategoryConfig[], activeCategoryFilter?: string) => void
   searchQuery: string
   setSearchQuery: (q: string) => void
   filterStatus: 'all' | 'running' | 'done' | 'error'
@@ -341,6 +448,23 @@ export const useStore = create<AppState>()(
       clearSelectedTasks: () => set({ selectedTaskIds: [] }),
 
       // Search & Filter
+      categories: [],
+      activeCategoryFilter: ALL_CATEGORY_FILTER,
+      setActiveCategoryFilter: (activeCategoryFilter) =>
+        set((state) => ({
+          activeCategoryFilter: resolveActiveCategoryFilter(activeCategoryFilter, state.categories),
+        })),
+      replaceCategoryState: (categories, activeCategoryFilter) =>
+        set(() => {
+          const normalizedCategories = normalizeCategoryList(categories)
+          return {
+            categories: normalizedCategories,
+            activeCategoryFilter: resolveActiveCategoryFilter(
+              activeCategoryFilter,
+              normalizedCategories,
+            ),
+          }
+        }),
       searchQuery: '',
       setSearchQuery: (searchQuery) => set({ searchQuery }),
       filterStatus: 'all',
@@ -382,11 +506,14 @@ export const useStore = create<AppState>()(
         settings: state.settings,
         providers: state.providers,
         activeProviderId: state.activeProviderId,
+        categories: state.categories,
+        activeCategoryFilter: state.activeCategoryFilter,
         params: state.params,
       }),
       merge: (persistedState, currentState) => {
         const persisted = persistedState as Partial<AppState> | undefined
         const normalizedProviders = normalizeProviderList(persisted?.providers)
+        const normalizedCategories = normalizeCategoryList(persisted?.categories)
         const providerState =
           normalizedProviders.length > 0
             ? (() => {
@@ -411,6 +538,11 @@ export const useStore = create<AppState>()(
           settings: providerState.settings,
           providers: providerState.providers,
           activeProviderId: providerState.activeProviderId,
+          categories: normalizedCategories,
+          activeCategoryFilter: resolveActiveCategoryFilter(
+            persisted?.activeCategoryFilter,
+            normalizedCategories,
+          ),
           params: {
             ...currentState.params,
             ...persisted?.params,
@@ -461,7 +593,9 @@ export async function submitTask() {
   const {
     settings,
     providers,
+    categories,
     activeProviderId,
+    activeCategoryFilter,
     prompt,
     inputImages,
     params,
@@ -497,11 +631,18 @@ export async function submitTask() {
 
   const taskId = genId()
   const selectedProvider = findProviderById(providers, activeProviderId)
+  const selectedCategory =
+    activeCategoryFilter !== ALL_CATEGORY_FILTER &&
+    activeCategoryFilter !== UNCATEGORIZED_CATEGORY_FILTER
+      ? findCategoryById(categories, activeCategoryFilter)
+      : undefined
   const requestSettings = selectedProvider ? getProviderSettings(selectedProvider) : settings
   const task: TaskRecord = {
     id: taskId,
     providerId: selectedProvider?.id ?? null,
     providerName: selectedProvider?.name?.trim() || UNKNOWN_TASK_PROVIDER_NAME,
+    categoryId: selectedCategory?.id ?? null,
+    categoryName: selectedCategory?.name ?? null,
     deletedAt: null,
     prompt: prompt.trim(),
     params: normalizedParams,
@@ -605,6 +746,164 @@ function clearTaskUiState(taskIds: Set<string>) {
     detailTaskId:
       state.detailTaskId && taskIds.has(state.detailTaskId) ? null : state.detailTaskId,
   }))
+}
+
+export function createCategory(name: string): CategoryConfig {
+  const { categories, showToast } = useStore.getState()
+  const normalizedName = ensureCategoryNameAvailable(categories, name)
+  const category = createCategoryConfig(normalizedName)
+
+  useStore.setState({
+    categories: [...categories, category],
+    activeCategoryFilter: category.id,
+  })
+
+  showToast(`已创建分类「${category.name}」`, 'success')
+  return category
+}
+
+export async function renameCategory(id: string, name: string) {
+  const { categories, tasks, setTasks, showToast } = useStore.getState()
+  const category = findCategoryById(categories, id)
+  if (!category) {
+    throw new Error('分类不存在')
+  }
+
+  const normalizedName = ensureCategoryNameAvailable(categories, name, id)
+  if (normalizedName === category.name) {
+    showToast('分类名称未变化', 'info')
+    return
+  }
+
+  const nextCategories = categories.map((item) =>
+    item.id === id ? { ...item, name: normalizedName } : item,
+  )
+  const updatedTasks = tasks.map((task) =>
+    task.categoryId === id ? { ...task, categoryName: normalizedName } : task,
+  )
+  const affectedTasks = updatedTasks.filter((task) => task.categoryId === id)
+
+  useStore.setState({ categories: nextCategories })
+  setTasks(updatedTasks)
+  await Promise.all(affectedTasks.map((task) => putTask(task)))
+  showToast(`已重命名为「${normalizedName}」`, 'success')
+}
+
+export async function deleteCategory(id: string) {
+  const {
+    categories,
+    activeCategoryFilter,
+    tasks,
+    setTasks,
+    showToast,
+  } = useStore.getState()
+  const category = findCategoryById(categories, id)
+  if (!category) {
+    throw new Error('分类不存在')
+  }
+
+  const nextCategories = categories.filter((item) => item.id !== id)
+  const updatedTasks = tasks.map((task) =>
+    task.categoryId === id ? { ...task, categoryId: null, categoryName: null } : task,
+  )
+  const nextFilter =
+    activeCategoryFilter === id
+      ? UNCATEGORIZED_CATEGORY_FILTER
+      : resolveActiveCategoryFilter(activeCategoryFilter, nextCategories)
+
+  useStore.setState({
+    categories: nextCategories,
+    activeCategoryFilter: nextFilter,
+  })
+  setTasks(updatedTasks)
+  await Promise.all(
+    tasks
+      .filter((task) => task.categoryId === id)
+      .map((task) =>
+        putTask({
+          ...task,
+          categoryId: null,
+          categoryName: null,
+        }),
+      ),
+  )
+
+  const movedCount = tasks.filter((task) => task.categoryId === id).length
+  showToast(
+    movedCount > 0
+      ? `已删除分类「${category.name}」，${movedCount} 条记录移入未分类`
+      : `已删除分类「${category.name}」`,
+    'success',
+  )
+}
+
+export async function moveTasksToCategory(
+  tasksToMove: TaskRecord[],
+  categoryId: string | null,
+) {
+  const { categories, tasks, setTasks, showToast } = useStore.getState()
+  if (!tasksToMove.length) return 0
+
+  const targetCategory = categoryId ? findCategoryById(categories, categoryId) : undefined
+  if (categoryId && !targetCategory) {
+    throw new Error('目标分类不存在')
+  }
+
+  const taskIds = new Set(tasksToMove.map((task) => task.id))
+  const matchedTasks = tasks.filter((task) => taskIds.has(task.id))
+  if (!matchedTasks.length) return 0
+
+  const nextCategoryId = targetCategory?.id ?? null
+  const nextCategoryName = targetCategory?.name ?? null
+  const changedTasks = matchedTasks.filter(
+    (task) =>
+      (task.categoryId ?? null) !== nextCategoryId ||
+      (task.categoryName ?? null) !== nextCategoryName,
+  )
+
+  if (!changedTasks.length) {
+    showToast(
+      targetCategory
+        ? `所选记录已在分类「${targetCategory.name}」下`
+        : '所选记录已在未分类中',
+      'info',
+    )
+    return 0
+  }
+
+  const changedTaskIds = new Set(changedTasks.map((task) => task.id))
+  const nextTasks = tasks.map((task) =>
+    changedTaskIds.has(task.id)
+      ? {
+          ...task,
+          categoryId: nextCategoryId,
+          categoryName: nextCategoryName,
+        }
+      : task,
+  )
+
+  setTasks(nextTasks)
+  await Promise.all(
+    changedTasks.map((task) =>
+      putTask({
+        ...task,
+        categoryId: nextCategoryId,
+        categoryName: nextCategoryName,
+      }),
+    ),
+  )
+
+  showToast(
+    nextCategoryName
+      ? `已将 ${changedTasks.length} 条记录移到「${nextCategoryName}」`
+      : `已将 ${changedTasks.length} 条记录移到未分类`,
+    'success',
+  )
+  return changedTasks.length
+}
+
+export async function moveTaskToCategory(task: TaskRecord, categoryId: string | null) {
+  return moveTasksToCategory([task], categoryId)
 }
 
 async function purgeTasksPermanently(
@@ -820,6 +1119,7 @@ export async function clearAllData() {
     setTasks,
     clearInputImages,
     replaceProviderState,
+    replaceCategoryState,
     setParams,
     setTaskView,
     showToast,
@@ -827,6 +1127,7 @@ export async function clearAllData() {
   setTasks([])
   clearInputImages()
   replaceProviderState([])
+  replaceCategoryState([])
   setParams({ ...DEFAULT_PARAMS })
   setTaskView('gallery')
   showToast('所有数据已清空', 'success')
@@ -858,7 +1159,8 @@ export async function exportData() {
   try {
     const tasks = await getAllTasks()
     const images = await getAllImages()
-    const { settings, providers, activeProviderId } = useStore.getState()
+    const { settings, providers, activeProviderId, categories, activeCategoryFilter } =
+      useStore.getState()
     const exportedAt = Date.now()
     const imageCreatedAtFallback = new Map<string, number>()
 
@@ -888,11 +1190,13 @@ export async function exportData() {
     }
 
     const manifest: ExportData = {
-      version: 3,
+      version: 4,
       exportedAt: new Date(exportedAt).toISOString(),
       settings,
       providers,
       activeProviderId,
+      categories,
+      activeCategoryFilter,
       tasks,
       imageFiles,
     }
@@ -958,6 +1262,9 @@ export async function importData(file: File) {
         undefined,
       )
     }
+    useStore
+      .getState()
+      .replaceCategoryState(data.categories ?? [], data.activeCategoryFilter)
 
     const tasks = await getAllTasks()
     useStore.getState().setTasks(tasks)

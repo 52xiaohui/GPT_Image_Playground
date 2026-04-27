@@ -5,11 +5,13 @@ import { formatImageRatio } from '../lib/size'
 
 interface Props {
   task: TaskRecord
+  categoryName: string
   providerName: string
   isInRecycleBin: boolean
   selected: boolean
   onReuse: () => void
   onEditOutputs: () => void
+  onMoveCategory: () => void
   onDelete: () => void
   onRestore: () => void
   onClick: () => void
@@ -20,11 +22,13 @@ const imageMetaCache = new Map<string, { ratio: string; size: string }>()
 
 function TaskCard({
   task,
+  categoryName,
   providerName,
   isInRecycleBin,
   selected,
   onReuse,
   onEditOutputs,
+  onMoveCategory,
   onDelete,
   onRestore,
   onClick,
@@ -258,6 +262,12 @@ function TaskCard({
                 </span>
               )}
               <span
+                className="max-w-[8rem] truncate text-xs px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-600 dark:bg-emerald-500/10 dark:text-emerald-300 flex-shrink-0"
+                title={categoryName}
+              >
+                {categoryName}
+              </span>
+              <span
                 className="max-w-[9rem] truncate text-xs px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 dark:bg-blue-500/10 dark:text-blue-300 flex-shrink-0"
                 title={providerName}
               >
@@ -266,13 +276,13 @@ function TaskCard({
               <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100 dark:bg-white/[0.04] text-gray-500 dark:text-gray-400 flex-shrink-0">
                 {task.params.quality}
               </span>
-                <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100 dark:bg-white/[0.04] text-gray-500 dark:text-gray-400 flex-shrink-0">
-                  {task.params.size}
-                </span>
-                <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100 dark:bg-white/[0.04] text-gray-500 dark:text-gray-400 flex-shrink-0">
-                  {task.params.output_format}
-                </span>
-              </div>
+              <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100 dark:bg-white/[0.04] text-gray-500 dark:text-gray-400 flex-shrink-0">
+                {task.params.size}
+              </span>
+              <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100 dark:bg-white/[0.04] text-gray-500 dark:text-gray-400 flex-shrink-0">
+                {task.params.output_format}
+              </span>
+            </div>
             {/* 操作按钮 */}
             <div
               className="flex gap-1 justify-end flex-shrink-0"
@@ -340,6 +350,26 @@ function TaskCard({
                     </svg>
                   </button>
                   <button
+                    onClick={onMoveCategory}
+                    className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-gray-400 transition hover:bg-amber-50 hover:text-amber-600 dark:hover:bg-amber-950/30 dark:hover:text-amber-300"
+                    title="移动分类"
+                  >
+                    <svg
+                      className="h-3.5 w-3.5"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M13 5H6a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V9a2 2 0 00-2-2h-5l-2-2zM12 11v6m0 0l-3-3m3 3l3-3"
+                      />
+                    </svg>
+                    <span>分类</span>
+                  </button>
+                  <button
                     onClick={onDelete}
                     className="p-1.5 rounded-md hover:bg-red-50 dark:hover:bg-red-950/30 text-gray-400 hover:text-red-500 transition"
                     title="移入回收站"
@@ -371,6 +401,7 @@ function TaskCard({
 export default memo(TaskCard, (prevProps, nextProps) => {
   return (
     prevProps.task === nextProps.task &&
+    prevProps.categoryName === nextProps.categoryName &&
     prevProps.providerName === nextProps.providerName &&
     prevProps.isInRecycleBin === nextProps.isInRecycleBin &&
     prevProps.selected === nextProps.selected

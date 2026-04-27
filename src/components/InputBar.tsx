@@ -1,6 +1,10 @@
 import { useRef, useEffect, useCallback, useState } from 'react'
 import { useStore, submitTask, addImageFromFile, addImageFromUrl } from '../store'
-import { DEFAULT_PARAMS } from '../types'
+import {
+  ALL_CATEGORY_FILTER,
+  DEFAULT_PARAMS,
+  resolveCategoryFilterName,
+} from '../types'
 import { normalizeImageSize } from '../lib/size'
 import Select from './Select'
 import SizePickerModal from './SizePickerModal'
@@ -25,6 +29,21 @@ function isRemotePreviewUrl(value: string): boolean {
   return /^https?:\/\//i.test(value)
 }
 
+function shouldIgnoreExpandShortcutTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  if (target.isContentEditable) return true
+
+  const tagName = target.tagName
+  return (
+    tagName === 'INPUT' ||
+    tagName === 'TEXTAREA' ||
+    tagName === 'SELECT' ||
+    tagName === 'BUTTON' ||
+    tagName === 'A' ||
+    target.closest('[role="button"]') !== null
+  )
+}
+
 function useIsMobile() {
   const [isMobile, setIsMobile] = useState(window.innerWidth < 640)
   useEffect(() => {
@@ -41,6 +60,8 @@ export default function InputBar() {
   const inputImages = useStore((s) => s.inputImages)
   const removeInputImage = useStore((s) => s.removeInputImage)
   const clearInputImages = useStore((s) => s.clearInputImages)
+  const categories = useStore((s) => s.categories)
+  const activeCategoryFilter = useStore((s) => s.activeCategoryFilter)
   const providers = useStore((s) => s.providers)
   const activeProviderId = useStore((s) => s.activeProviderId)
   const setActiveProvider = useStore((s) => s.setActiveProvider)
@@ -61,6 +82,7 @@ export default function InputBar() {
   const [submitHover, setSubmitHover] = useState(false)
   const [attachHover, setAttachHover] = useState(false)
   const [mobileCollapsed, setMobileCollapsed] = useState(false)
+  const [promptCollapsed, setPromptCollapsed] = useState(false)
   const [showSizePicker, setShowSizePicker] = useState(false)
   const [showImageUrlInput, setShowImageUrlInput] = useState(false)
   const [imageUrlInput, setImageUrlInput] = useState('')
@@ -76,11 +98,25 @@ export default function InputBar() {
     label: provider.name,
     value: provider.id,
   }))
+  const generationTargetLabel =
+    activeCategoryFilter === ALL_CATEGORY_FILTER
+      ? '未分类'
+      : resolveCategoryFilterName(activeCategoryFilter, categories)
 
   const canSubmit = (prompt.trim() || inputImages.length) && settings.apiKey
   const atImageLimit = inputImages.length >= API_MAX_IMAGES
   const localInputImageCount = inputImages.filter((img) => !isRemotePreviewUrl(img.dataUrl)).length
   const remoteInputImageCount = inputImages.length - localInputImageCount
+  const normalizedPrompt = prompt.trim()
+  const promptPreview =
+    normalizedPrompt.replace(/\s+/g, ' ').slice(0, 120) || '输入框已收起，点击展开继续编辑'
+  const expandPromptInput = useCallback((focusTextarea = true) => {
+    setPromptCollapsed(false)
+    if (!focusTextarea) return
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus()
+    })
+  }, [])
 
   useEffect(() => {
     setOutputCompressionInput(
@@ -262,6 +298,14 @@ export default function InputBar() {
     const el = textareaRef.current
     if (!el) return
 
+    if (promptCollapsed) {
+      el.style.transition = 'height 150ms ease, border-color 200ms, box-shadow 200ms'
+      el.style.height = '42px'
+      el.style.overflowY = 'hidden'
+      prevHeightRef.current = 42
+      return
+    }
+
     // 计算图片区域和其他固定元素占用的高度
     const imagesHeight = imagesRef.current?.offsetHeight ?? 0
     const fixedOverhead = imagesHeight + 140
@@ -288,21 +332,38 @@ export default function InputBar() {
     el.style.overflowY = desired > maxH ? 'auto' : 'hidden'
 
     prevHeightRef.current = targetH
-  }, [])
+  }, [promptCollapsed])
 
   useEffect(() => {
     adjustTextareaHeight()
-  }, [prompt, adjustTextareaHeight])
+  }, [prompt, promptCollapsed, adjustTextareaHeight])
 
   // 图片队列变化时也重新计算
   useEffect(() => {
     adjustTextareaHeight()
-  }, [inputImages.length, adjustTextareaHeight])
+  }, [inputImages.length, promptCollapsed, adjustTextareaHeight])
 
   useEffect(() => {
     window.addEventListener('resize', adjustTextareaHeight)
     return () => window.removeEventListener('resize', adjustTextareaHeight)
   }, [adjustTextareaHeight])
+
+  useEffect(() => {
+    if (!promptCollapsed) return
+
+    const handleExpandShortcut = (event: KeyboardEvent) => {
+      if (event.key !== 'Enter') return
+      if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return
+      if (event.isComposing) return
+      if (shouldIgnoreExpandShortcutTarget(event.target)) return
+
+      event.preventDefault()
+      expandPromptInput()
+    }
+
+    document.addEventListener('keydown', handleExpandShortcut)
+    return () => document.removeEventListener('keydown', handleExpandShortcut)
+  }, [expandPromptInput, promptCollapsed])
 
   // 移动端拖动条手势
   useEffect(() => {
@@ -563,53 +624,105 @@ export default function InputBar() {
             </div>
           )}
 
-          {/* 输入框 */}
-          <textarea
-            ref={textareaRef}
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            onKeyDown={handleKeyDown}
-            rows={1}
-            placeholder="描述你想生成的图片..."
-            className="w-full px-4 py-3 rounded-2xl border border-gray-200/60 dark:border-white/[0.08] bg-white/50 dark:bg-white/[0.03] text-sm focus:outline-none leading-relaxed resize-none shadow-sm transition-[border-color,box-shadow] duration-200"
-          />
-
-          {showImageUrlInput && (
-            <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-              <input
-                value={imageUrlInput}
-                onChange={(e) => setImageUrlInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault()
-                    handleAddImageUrl()
-                  }
-                }}
-                type="url"
-                placeholder="粘贴公网图片 URL，例如 https://example.com/reference.png"
-                className="flex-1 px-4 py-2.5 rounded-2xl border border-gray-200/60 dark:border-white/[0.08] bg-white/50 dark:bg-white/[0.03] text-sm focus:outline-none shadow-sm"
-              />
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={handleAddImageUrl}
-                  className="px-4 py-2.5 rounded-2xl bg-blue-500 text-white text-sm font-medium hover:bg-blue-600 transition-all shadow-sm"
-                >
-                  添加 URL
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowImageUrlInput(false)
-                    setImageUrlInput('')
-                  }}
-                  className="px-4 py-2.5 rounded-2xl bg-gray-200 dark:bg-white/[0.06] text-gray-600 dark:text-gray-300 text-sm font-medium hover:bg-gray-300 dark:hover:bg-white/[0.1] transition-all shadow-sm"
-                >
-                  取消
-                </button>
-              </div>
+          <div className="mt-3 flex items-center justify-between gap-3 text-xs text-gray-400 dark:text-gray-500">
+            <div className="min-w-0 truncate">
+              {normalizedPrompt ? `提示词 ${normalizedPrompt.length} 字` : '提示词为空'}
             </div>
+            <button
+              type="button"
+              onClick={() => {
+                if (promptCollapsed) {
+                  expandPromptInput()
+                  return
+                }
+                setPromptCollapsed(true)
+              }}
+              className="inline-flex items-center gap-1 rounded-full border border-gray-200/80 bg-white/70 px-2.5 py-1 text-xs text-gray-500 transition hover:bg-white hover:text-gray-700 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-gray-400 dark:hover:bg-white/[0.08] dark:hover:text-gray-200"
+            >
+              <svg
+                className={`h-3.5 w-3.5 transition-transform duration-200 ${promptCollapsed ? 'rotate-180' : ''}`}
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+              {promptCollapsed ? '展开输入' : '收起输入'}
+            </button>
+          </div>
+
+          {promptCollapsed && (
+            <button
+              type="button"
+              onClick={expandPromptInput}
+              className="mt-2 block w-full rounded-2xl border border-dashed border-gray-200/80 bg-white/40 px-4 py-3 text-left text-sm text-gray-500 transition hover:bg-white/70 hover:text-gray-700 dark:border-white/[0.08] dark:bg-white/[0.02] dark:text-gray-400 dark:hover:bg-white/[0.04] dark:hover:text-gray-200"
+              title="展开提示词输入区"
+            >
+              <span className="block truncate">{promptPreview}</span>
+            </button>
           )}
+
+          <div className={`collapse-section${promptCollapsed ? ' collapsed' : ''}`}>
+            <div className="collapse-inner">
+              {/* 输入框 */}
+              <textarea
+                ref={textareaRef}
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                onKeyDown={handleKeyDown}
+                rows={1}
+                placeholder="描述你想生成的图片..."
+                className="mt-2 w-full px-4 py-3 rounded-2xl border border-gray-200/60 dark:border-white/[0.08] bg-white/50 dark:bg-white/[0.03] text-sm focus:outline-none leading-relaxed resize-none shadow-sm transition-[border-color,box-shadow] duration-200"
+              />
+
+              {showImageUrlInput && (
+                <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+                  <input
+                    value={imageUrlInput}
+                    onChange={(e) => setImageUrlInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        handleAddImageUrl()
+                      }
+                    }}
+                    type="url"
+                    placeholder="粘贴公网图片 URL，例如 https://example.com/reference.png"
+                    className="flex-1 px-4 py-2.5 rounded-2xl border border-gray-200/60 dark:border-white/[0.08] bg-white/50 dark:bg-white/[0.03] text-sm focus:outline-none shadow-sm"
+                  />
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={handleAddImageUrl}
+                      className="px-4 py-2.5 rounded-2xl bg-blue-500 text-white text-sm font-medium hover:bg-blue-600 transition-all shadow-sm"
+                    >
+                      添加 URL
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowImageUrlInput(false)
+                        setImageUrlInput('')
+                      }}
+                      className="px-4 py-2.5 rounded-2xl bg-gray-200 dark:bg-white/[0.06] text-gray-600 dark:text-gray-300 text-sm font-medium hover:bg-gray-300 dark:hover:bg-white/[0.1] transition-all shadow-sm"
+                    >
+                      取消
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-gray-400 dark:text-gray-500">
+            <span>本次生成将保存到</span>
+            <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-emerald-600 dark:bg-emerald-500/10 dark:text-emerald-300">
+              {generationTargetLabel}
+            </span>
+            {activeCategoryFilter === ALL_CATEGORY_FILTER && (
+              <span>当前位于全部分类视图，默认进入未分类。</span>
+            )}
+          </div>
 
           {/* 参数 + 按钮 */}
           <div className="mt-3">
@@ -640,7 +753,10 @@ export default function InputBar() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => setShowImageUrlInput((v) => !v)}
+                  onClick={() => {
+                    expandPromptInput(false)
+                    setShowImageUrlInput((v) => !v)
+                  }}
                   className="p-2.5 rounded-xl bg-gray-200 dark:bg-white/[0.06] hover:bg-gray-300 dark:hover:bg-white/[0.1] text-gray-500 dark:text-gray-300 transition-all shadow-sm"
                   title="添加公网图片 URL"
                 >
@@ -704,7 +820,10 @@ export default function InputBar() {
                 </div>
                 <button
                   type="button"
-                  onClick={() => setShowImageUrlInput((v) => !v)}
+                  onClick={() => {
+                    expandPromptInput(false)
+                    setShowImageUrlInput((v) => !v)
+                  }}
                   className="p-2.5 rounded-xl bg-gray-200 dark:bg-white/[0.06] hover:bg-gray-300 dark:hover:bg-white/[0.1] text-gray-500 dark:text-gray-300 transition-all shadow-sm flex-shrink-0"
                   title="添加公网图片 URL"
                 >

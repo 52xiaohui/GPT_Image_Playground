@@ -19,6 +19,15 @@ export interface ProviderConfig extends AppSettings {
   name: string
 }
 
+export interface CategoryConfig {
+  id: string
+  name: string
+  createdAt: number
+}
+
+export const ALL_CATEGORY_FILTER = '__all__'
+export const UNCATEGORIZED_CATEGORY_FILTER = '__uncategorized__'
+export const UNCATEGORIZED_CATEGORY_NAME = '未分类'
 export const UNKNOWN_TASK_PROVIDER_NAME = '未记录供应商'
 
 const DEFAULT_BASE_URL = import.meta.env.VITE_DEFAULT_API_URL?.trim() || 'https://api.openai.com'
@@ -73,6 +82,10 @@ export interface TaskRecord {
   providerId?: string | null
   /** 任务提交时记录的供应商名称快照 */
   providerName?: string | null
+  /** 任务提交时记录的分类 ID */
+  categoryId?: string | null
+  /** 任务提交时记录的分类名称快照 */
+  categoryName?: string | null
   /** 移入回收站时间，null 表示仍在画廊 */
   deletedAt?: number | null
   prompt: string
@@ -134,6 +147,8 @@ export interface ExportData {
   settings: AppSettings
   providers?: ProviderConfig[]
   activeProviderId?: string
+  categories?: CategoryConfig[]
+  activeCategoryFilter?: string
   tasks: TaskRecord[]
   /** imageId → 图片信息 */
   imageFiles: Record<string, {
@@ -159,6 +174,32 @@ export function resolveTaskProviderName(
   }
 
   return UNKNOWN_TASK_PROVIDER_NAME
+}
+
+export function resolveTaskCategoryName(
+  task: Pick<TaskRecord, 'categoryId' | 'categoryName'>,
+  categories: CategoryConfig[],
+): string {
+  if (task.categoryId) {
+    const category = categories.find((item) => item.id === task.categoryId)
+    if (category?.name?.trim()) {
+      return category.name.trim()
+    }
+  }
+
+  const snapshotName = task.categoryName?.trim()
+  return snapshotName || UNCATEGORIZED_CATEGORY_NAME
+}
+
+export function resolveCategoryFilterName(
+  filter: string,
+  categories: CategoryConfig[],
+): string {
+  if (filter === ALL_CATEGORY_FILTER) return '全部分类'
+  if (filter === UNCATEGORIZED_CATEGORY_FILTER) return UNCATEGORIZED_CATEGORY_NAME
+
+  const category = categories.find((item) => item.id === filter)
+  return category?.name?.trim() || UNCATEGORIZED_CATEGORY_NAME
 }
 
 export function isTaskInRecycleBin(task: Pick<TaskRecord, 'deletedAt'>): boolean {

@@ -10,12 +10,17 @@ import {
 } from '../store'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import { formatImageRatio } from '../lib/size'
-import { isTaskInRecycleBin, resolveTaskProviderName } from '../types'
+import {
+  isTaskInRecycleBin,
+  resolveTaskCategoryName,
+  resolveTaskProviderName,
+} from '../types'
 
 const RECYCLE_BIN_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 
 export default function DetailModal() {
   const tasks = useStore((s) => s.tasks)
+  const categories = useStore((s) => s.categories)
   const providers = useStore((s) => s.providers)
   const detailTaskId = useStore((s) => s.detailTaskId)
   const setDetailTaskId = useStore((s) => s.setDetailTaskId)
@@ -118,6 +123,7 @@ export default function DetailModal() {
   const currentImageRatio = currentOutputImageId ? imageRatios[currentOutputImageId] : ''
   const currentImageSize = currentOutputImageId ? imageSizes[currentOutputImageId] : ''
   const providerName = resolveTaskProviderName(task, providers)
+  const categoryName = resolveTaskCategoryName(task, categories)
   const inRecycleBin = isTaskInRecycleBin(task)
   const cleanupDueAt = inRecycleBin ? (task.deletedAt ?? 0) + RECYCLE_BIN_RETENTION_MS : null
 
@@ -415,6 +421,11 @@ export default function DetailModal() {
               参数配置
             </h3>
             <div className="grid grid-cols-2 gap-2 text-xs mb-4">
+              <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2">
+                <span className="text-gray-400 dark:text-gray-500">分类</span>
+                <br />
+                <span className="text-gray-700 dark:text-gray-300 font-medium break-all">{categoryName}</span>
+              </div>
               <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2">
                 <span className="text-gray-400 dark:text-gray-500">供应商</span>
                 <br />

@@ -1,6 +1,26 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { type TaskRecord, isTaskInRecycleBin, resolveTaskProviderName } from '../types'
-import { useStore, reuseConfig, editOutputs, removeTask, removeTasks, restoreTask, restoreTasks } from '../store'
+import {
+  ALL_CATEGORY_FILTER,
+  UNCATEGORIZED_CATEGORY_FILTER,
+  type TaskRecord,
+  isTaskInRecycleBin,
+  resolveCategoryFilterName,
+  resolveTaskCategoryName,
+  resolveTaskProviderName,
+} from '../types'
+import {
+  useStore,
+  reuseConfig,
+  editOutputs,
+  moveTaskToCategory,
+  moveTasksToCategory,
+  removeTask,
+  removeTasks,
+  restoreTask,
+  restoreTasks,
+} from '../store'
+import MoveCategoryModal from './MoveCategoryModal'
+import Select from './Select'
 import TaskCard from './TaskCard'
 
 const INITIAL_VISIBLE_TASK_COUNT = 24
@@ -8,7 +28,9 @@ const LOAD_MORE_TASK_COUNT = 24
 
 export default function TaskGrid() {
   const tasks = useStore((s) => s.tasks)
+  const categories = useStore((s) => s.categories)
   const providers = useStore((s) => s.providers)
+  const activeCategoryFilter = useStore((s) => s.activeCategoryFilter)
   const searchQuery = useStore((s) => s.searchQuery)
   const filterStatus = useStore((s) => s.filterStatus)
   const taskView = useStore((s) => s.taskView)
@@ -18,8 +40,13 @@ export default function TaskGrid() {
   const clearSelectedTasks = useStore((s) => s.clearSelectedTasks)
   const setDetailTaskId = useStore((s) => s.setDetailTaskId)
   const setConfirmDialog = useStore((s) => s.setConfirmDialog)
+  const showToast = useStore((s) => s.showToast)
   const loadMoreRef = useRef<HTMLDivElement | null>(null)
   const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE_TASK_COUNT)
+  const [batchCategoryTarget, setBatchCategoryTarget] = useState(UNCATEGORIZED_CATEGORY_FILTER)
+  const [movingTask, setMovingTask] = useState<TaskRecord | null>(null)
+  const [moveCategoryTarget, setMoveCategoryTarget] = useState(UNCATEGORIZED_CATEGORY_FILTER)
+  const categoryIdSet = useMemo(() => new Set(categories.map((category) => category.id)), [categories])
   const sourceTasks = useMemo(
     () =>
       tasks.filter((task) =>
@@ -35,22 +62,64 @@ export default function TaskGrid() {
       return timeB - timeA
     })
     const q = searchQuery.trim().toLowerCase()
-    
+
     return sorted.filter((t) => {
+      const matchCategory =
+        taskView !== 'gallery'
+          ? true
+          : activeCategoryFilter === ALL_CATEGORY_FILTER
+            ? true
+            : activeCategoryFilter === UNCATEGORIZED_CATEGORY_FILTER
+              ? !t.categoryId || !categoryIdSet.has(t.categoryId)
+              : t.categoryId === activeCategoryFilter
+      if (!matchCategory) return false
+
       const matchStatus = filterStatus === 'all' || t.status === filterStatus
       if (!matchStatus) return false
-      
+
       if (!q) return true
       const prompt = (t.prompt || '').toLowerCase()
       const paramStr = JSON.stringify(t.params).toLowerCase()
       const providerName = resolveTaskProviderName(t, providers).toLowerCase()
-      return prompt.includes(q) || paramStr.includes(q) || providerName.includes(q)
+      const categoryName = resolveTaskCategoryName(t, categories).toLowerCase()
+      return (
+        prompt.includes(q) ||
+        paramStr.includes(q) ||
+        providerName.includes(q) ||
+        categoryName.includes(q)
+      )
     })
-  }, [sourceTasks, taskView, providers, searchQuery, filterStatus])
+  }, [
+    activeCategoryFilter,
+    categories,
+    categoryIdSet,
+    filterStatus,
+    providers,
+    searchQuery,
+    sourceTasks,
+    taskView,
+  ])
 
   useEffect(() => {
     setVisibleCount(INITIAL_VISIBLE_TASK_COUNT)
-  }, [searchQuery, filterStatus, taskView])
+  }, [activeCategoryFilter, searchQuery, filterStatus, taskView])
+
+  useEffect(() => {
+    const nextTarget =
+      activeCategoryFilter !== ALL_CATEGORY_FILTER &&
+      activeCategoryFilter !== UNCATEGORIZED_CATEGORY_FILTER &&
+      categories.some((category) => category.id === activeCategoryFilter)
+        ? activeCategoryFilter
+        : UNCATEGORIZED_CATEGORY_FILTER
+    setBatchCategoryTarget(nextTarget)
+  }, [activeCategoryFilter, categories])
+
+  useEffect(() => {
+    if (!movingTask) return
+    if (moveCategoryTarget === UNCATEGORIZED_CATEGORY_FILTER) return
+    if (categories.some((category) => category.id === moveCategoryTarget)) return
+    setMoveCategoryTarget(UNCATEGORIZED_CATEGORY_FILTER)
+  }, [categories, moveCategoryTarget, movingTask])
 
   useEffect(() => {
     if (visibleCount >= filteredTasks.length) return
@@ -95,6 +164,17 @@ export default function TaskGrid() {
   const hasVisibleTasks = visibleTaskIds.length > 0
   const allVisibleSelected = hasVisibleTasks && visibleSelectedCount === visibleTaskIds.length
   const showSelectionBar = hasVisibleTasks || selectedCount > 0
+  const categoryOptions = useMemo(
+    () => [
+      { label: '未分类', value: UNCATEGORIZED_CATEGORY_FILTER },
+      ...categories.map((category) => ({
+        label: category.name,
+        value: category.id,
+      })),
+    ],
+    [categories],
+  )
+  const activeCategoryLabel = resolveCategoryFilterName(activeCategoryFilter, categories)
 
   const handleDelete = (task: TaskRecord) => {
     setConfirmDialog({
@@ -143,6 +223,40 @@ export default function TaskGrid() {
     })
   }
 
+  const handleBatchMoveCategory = async () => {
+    if (!selectedTasks.length) return
+    try {
+      await moveTasksToCategory(
+        selectedTasks,
+        batchCategoryTarget === UNCATEGORIZED_CATEGORY_FILTER ? null : batchCategoryTarget,
+      )
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : String(error), 'error')
+    }
+  }
+
+  const openMoveCategoryModal = (task: TaskRecord) => {
+    setMovingTask(task)
+    setMoveCategoryTarget(
+      task.categoryId && categoryIdSet.has(task.categoryId)
+        ? task.categoryId
+        : UNCATEGORIZED_CATEGORY_FILTER,
+    )
+  }
+
+  const handleSingleTaskMoveCategory = async () => {
+    if (!movingTask) return
+    try {
+      await moveTaskToCategory(
+        movingTask,
+        moveCategoryTarget === UNCATEGORIZED_CATEGORY_FILTER ? null : moveCategoryTarget,
+      )
+      setMovingTask(null)
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : String(error), 'error')
+    }
+  }
+
   return (
     <div className="space-y-4">
       {showSelectionBar && (
@@ -158,6 +272,28 @@ export default function TaskGrid() {
             )}
           </div>
           <div className="flex flex-wrap gap-2">
+            {taskView === 'gallery' && (
+              <>
+                <div className="min-w-[10rem]">
+                  <Select
+                    value={batchCategoryTarget}
+                    onChange={(value) => setBatchCategoryTarget(String(value))}
+                    options={categoryOptions}
+                    className="px-3 py-1.5 rounded-lg border border-gray-200 text-sm text-gray-600 transition hover:bg-gray-50 dark:border-white/[0.08] dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-white/[0.04]"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleBatchMoveCategory()
+                  }}
+                  disabled={!selectedCount}
+                  className="px-3 py-1.5 rounded-lg border border-emerald-200/80 bg-emerald-50 text-sm text-emerald-600 transition hover:bg-emerald-100/80 disabled:cursor-not-allowed disabled:opacity-40 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-300 dark:hover:bg-emerald-500/20"
+                >
+                  移动分类
+                </button>
+              </>
+            )}
             <button
               type="button"
               onClick={handleToggleAllVisible}
@@ -196,6 +332,8 @@ export default function TaskGrid() {
             <p className="text-sm">没有找到匹配的记录</p>
           ) : taskView === 'trash' ? (
             <p className="text-sm">回收站为空</p>
+          ) : activeCategoryFilter !== ALL_CATEGORY_FILTER ? (
+            <p className="text-sm">分类「{activeCategoryLabel}」里还没有项目</p>
           ) : (
             <>
               <svg
@@ -227,6 +365,7 @@ export default function TaskGrid() {
               <TaskCard
                 key={task.id}
                 task={task}
+                categoryName={resolveTaskCategoryName(task, categories)}
                 providerName={resolveTaskProviderName(task, providers)}
                 isInRecycleBin={taskView === 'trash'}
                 selected={selectedIdSet.has(task.id)}
@@ -234,6 +373,7 @@ export default function TaskGrid() {
                 onToggleSelect={() => toggleTaskSelection(task.id)}
                 onReuse={() => reuseConfig(task)}
                 onEditOutputs={() => editOutputs(task)}
+                onMoveCategory={() => openMoveCategoryModal(task)}
                 onDelete={() => handleDelete(task)}
                 onRestore={() => handleRestore(task)}
               />
@@ -257,6 +397,16 @@ export default function TaskGrid() {
           )}
         </>
       )}
+      <MoveCategoryModal
+        task={movingTask}
+        categories={categories}
+        targetCategory={moveCategoryTarget}
+        onTargetCategoryChange={setMoveCategoryTarget}
+        onClose={() => setMovingTask(null)}
+        onConfirm={() => {
+          void handleSingleTaskMoveCategory()
+        }}
+      />
     </div>
   )
 }
