@@ -137,20 +137,14 @@ docker compose up -d
 <details>
 <summary><strong>💻 方式三：本地开发与自行构建</strong></summary>
 
-1. **环境准备 (可选)**
-   你可以在项目根目录新建 `.env.local` 文件，配置构建时的默认 API URL：
-   ```bash
-   VITE_DEFAULT_API_URL=https://api.openai.com
-   ```
-
-2. **安装依赖与启动开发服务器**
+1. **安装依赖与启动开发服务器**
    ```bash
    npm install
    npm run dev
    ```
    随后浏览器访问 `http://localhost:5173`。
 
-3. **本地开发跨域代理（可选）**
+2. **本地开发跨域代理（默认请求模式）**
    如果你的图片接口没有放开浏览器跨域，前端直接请求接口时可能会被浏览器的 CORS 策略拦截。这个可选代理用于本地开发调试：浏览器先请求同源的 Vite 开发服务器，再由 Vite 开发服务器转发到真实接口。
 
    请求链路如下：
@@ -166,11 +160,7 @@ docker compose up -d
 
    注意：这个代理只在 `npm run dev` 启动的 Vite 开发服务器中生效。它不会打包进静态产物，也不会在 Vercel、GitHub Pages 或普通 Nginx 静态部署中生效。
 
-   先复制示例配置：
-   ```bash
-   cp dev-proxy.config.example.json dev-proxy.config.json
-   ```
-   然后修改项目根目录下的本地 `dev-proxy.config.json`：
+   项目根目录默认提供了一份 `dev-proxy.config.json`，可直接按需修改：
    ```json
    {
      "enabled": true,
@@ -188,11 +178,11 @@ docker compose up -d
    - `changeOrigin`：转发时是否把请求头中的 `Host` 改成 `target` 的主机名，通常建议保持 `true`。
    - `secure`：当 `target` 是 HTTPS 时是否校验证书；本地自签名证书可设为 `false`。
 
-   修改配置后需要重新启动开发服务器，并在页面设置中的 `API URL` 填入与 `target` 相同的地址。当前端发现 `API URL` 与 `target` 匹配时，会把请求改写为 `prefix` 开头的同源地址，例如 `/api-proxy/v1/images/generations`。
+   本地开发环境下，页面设置里的默认 `请求模式` 是 `本地代理`。修改配置后需要重新启动开发服务器，并在页面设置中的 `API URL` 填入与 `target` 相同的地址。当前端发现 `API URL` 与 `target` 匹配时，会把请求改写为 `prefix` 开头的同源地址，例如 `/api-proxy/v1/images/generations`。
 
    如果需要在线上部署中使用代理，请使用 Vercel Function、Cloudflare Worker、Nginx 反向代理或自建后端等服务端方案。
 
-4. **构建静态产物**
+3. **构建静态产物**
    ```bash
    npm run build
    ```
