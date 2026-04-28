@@ -6,7 +6,9 @@ import type {
   ImageEditSelection,
   ImageEditSession,
   ProviderConfig,
+  ResponsesPromptRevisionMode,
   TaskParams,
+  TaskErrorDebugInfo,
   InputImage,
   TaskRecord,
   ExportData,
@@ -45,7 +47,14 @@ const imageCache = new Map<string, string>()
 const imageLoadPromiseCache = new Map<string, Promise<string | undefined>>()
 const RECYCLE_BIN_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const RECYCLE_BIN_POLL_INTERVAL_MS = 10 * 60 * 1000
+const ERROR_LOG_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+const ERROR_LOG_POLL_INTERVAL_MS = 12 * 60 * 60 * 1000
 let recycleBinJanitorId: number | null = null
+let errorLogJanitorId: number | null = null
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
 
 export function getCachedImage(id: string): string | undefined {
   return imageCache.get(id)
@@ -242,9 +251,19 @@ function createProviderConfig(
   name: string,
   id = genProviderId(),
 ): ProviderConfig {
+  const legacySettings = settings as Partial<AppSettings> & { allowResponsesPromptRevision?: unknown }
+  const responsesPromptRevisionMode: ResponsesPromptRevisionMode =
+    legacySettings.responsesPromptRevisionMode === 'allow' ||
+    legacySettings.responsesPromptRevisionMode === 'compat'
+      ? legacySettings.responsesPromptRevisionMode
+      : legacySettings.allowResponsesPromptRevision === false
+        ? 'compat'
+        : DEFAULT_SETTINGS.responsesPromptRevisionMode
+
   return {
     ...DEFAULT_SETTINGS,
     ...settings,
+    responsesPromptRevisionMode,
     id,
     name: name.trim() || '未命名供应商',
   }
@@ -265,6 +284,102 @@ function createInitialProviderState(settings: Partial<AppSettings> = DEFAULT_SET
     activeProviderId: provider.id,
     settings: getProviderSettings(provider),
   }
+}
+
+type StoreApiError = Error & {
+  status?: number
+  requestId?: string
+  details?: unknown
+}
+
+function readLocalDebugFromErrorDetails(details: unknown): TaskErrorDebugInfo | null {
+  if (!isRecord(details)) return null
+  return isRecord(details.localDebug) ? (details.localDebug as TaskErrorDebugInfo) : null
+}
+
+function buildTaskErrorDebugInfo(
+  requestSettings: AppSettings,
+  err: unknown,
+): TaskErrorDebugInfo {
+  const apiError = (err instanceof Error ? err : new Error(String(err))) as StoreApiError
+  const localDebug = readLocalDebugFromErrorDetails(apiError.details)
+  if (localDebug) {
+    return localDebug
+  }
+
+  const debugInfo: TaskErrorDebugInfo = {
+    createdAt: Date.now(),
+    requestId: apiError.requestId || null,
+    status: typeof apiError.status === 'number' ? apiError.status : null,
+    requestMode: requestSettings.requestMode || DEFAULT_SETTINGS.requestMode,
+    apiProtocol: requestSettings.apiProtocol || DEFAULT_SETTINGS.apiProtocol,
+    baseUrl: requestSettings.baseUrl,
+    model: requestSettings.model,
+    responsesImageModel: requestSettings.responsesImageModel || null,
+    responsesTransport: requestSettings.responsesTransport || null,
+    responsesImageInputMode: requestSettings.responsesImageInputMode || null,
+    responsesPromptRevisionMode: requestSettings.responsesPromptRevisionMode || null,
+  }
+
+  if (apiError.details !== undefined) {
+    debugInfo.details = apiError.details
+  }
+
+  return debugInfo
+}
+
+function resolveErrorDebugCreatedAt(task: Pick<TaskRecord, 'createdAt' | 'finishedAt' | 'errorDebug'>): number {
+  if (typeof task.errorDebug?.createdAt === 'number' && Number.isFinite(task.errorDebug.createdAt)) {
+    return task.errorDebug.createdAt
+  }
+  if (typeof task.finishedAt === 'number' && Number.isFinite(task.finishedAt)) {
+    return task.finishedAt
+  }
+  return task.createdAt
+}
+
+async function cleanupExpiredErrorDebugLogs(tasks: TaskRecord[]): Promise<TaskRecord[]> {
+  const cutoff = Date.now() - ERROR_LOG_RETENTION_MS
+  const expiredTaskIds = new Set(
+    tasks
+      .filter((task) => task.errorDebug && resolveErrorDebugCreatedAt(task) < cutoff)
+      .map((task) => task.id),
+  )
+
+  if (!expiredTaskIds.size) {
+    return tasks
+  }
+
+  const updatedTasks = tasks.map((task) =>
+    expiredTaskIds.has(task.id)
+      ? {
+          ...task,
+          errorDebug: null,
+        }
+      : task,
+  )
+
+  await Promise.all(
+    updatedTasks
+      .filter((task) => expiredTaskIds.has(task.id))
+      .map((task) => putTask(task)),
+  )
+
+  return updatedTasks
+}
+
+function ensureErrorLogJanitorStarted() {
+  if (errorLogJanitorId != null) return
+
+  errorLogJanitorId = window.setInterval(() => {
+    void (async () => {
+      const { tasks, setTasks } = useStore.getState()
+      const updatedTasks = await cleanupExpiredErrorDebugLogs(tasks)
+      if (updatedTasks !== tasks) {
+        setTasks(updatedTasks)
+      }
+    })()
+  }, ERROR_LOG_POLL_INTERVAL_MS)
 }
 
 function normalizeProviderList(providers: unknown): ProviderConfig[] {
@@ -305,6 +420,7 @@ function isSameProviderConfig(left: ProviderConfig, right: ProviderConfig): bool
     leftSettings.responsesImageModel === rightSettings.responsesImageModel &&
     leftSettings.responsesTransport === rightSettings.responsesTransport &&
     leftSettings.responsesImageInputMode === rightSettings.responsesImageInputMode &&
+    leftSettings.responsesPromptRevisionMode === rightSettings.responsesPromptRevisionMode &&
     leftSettings.timeout === rightSettings.timeout &&
     leftSettings.apiProtocol === rightSettings.apiProtocol &&
     leftSettings.requestMode === rightSettings.requestMode
@@ -846,9 +962,10 @@ function genId(): string {
 
 /** 初始化：从 IndexedDB 加载任务和图片缓存，清理孤立图片 */
 export async function initStore() {
-  const tasks = await getAllTasks()
+  const tasks = await cleanupExpiredErrorDebugLogs(await getAllTasks())
   useStore.getState().setTasks(tasks)
   repairCategoryStateFromTasks(tasks)
+  ensureErrorLogJanitorStarted()
 
   // 图片改为按需懒加载，避免启动时把整个图库都塞进内存，拖慢画廊首屏。
   window.setTimeout(() => {
@@ -947,6 +1064,8 @@ export async function submitTask() {
     editSourceImageId: maskedInput?.sourceImageId ?? maskedInput?.id ?? null,
     editSelection: maskedInput?.editSelection ?? null,
     outputImages: [],
+    responseMeta: null,
+    errorDebug: null,
     status: 'running',
     error: null,
     createdAt: Date.now(),
@@ -1011,6 +1130,9 @@ async function executeTask(taskId: string, requestSettings?: AppSettings) {
     // 更新任务
     updateTaskInStore(taskId, {
       outputImages: outputIds,
+      responseMeta: result.responseMeta ?? null,
+      error: null,
+      errorDebug: null,
       status: 'done',
       finishedAt: Date.now(),
       elapsed: Date.now() - task.createdAt,
@@ -1021,6 +1143,7 @@ async function executeTask(taskId: string, requestSettings?: AppSettings) {
     updateTaskInStore(taskId, {
       status: 'error',
       error: err instanceof Error ? err.message : String(err),
+      errorDebug: buildTaskErrorDebugInfo(providerSettings, err),
       finishedAt: Date.now(),
       elapsed: Date.now() - task.createdAt,
     })

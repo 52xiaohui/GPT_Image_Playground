@@ -8,6 +8,7 @@ import {
   type ApiProtocol,
   type RequestMode,
   type ResponsesImageInputMode,
+  type ResponsesPromptRevisionMode,
   type ResponsesTransportMode,
 } from '../types'
 import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
@@ -33,6 +34,11 @@ const RESPONSES_TRANSPORT_OPTIONS: Array<{ label: string; value: ResponsesTransp
 const RESPONSES_IMAGE_INPUT_MODE_OPTIONS: Array<{ label: string; value: ResponsesImageInputMode }> = [
   { label: '自动', value: 'auto' },
   { label: '上传 file_id', value: 'file_id' },
+]
+
+const RESPONSES_PROMPT_REVISION_MODE_OPTIONS: Array<{ label: string; value: ResponsesPromptRevisionMode }> = [
+  { label: '允许', value: 'allow' },
+  { label: '禁止（软禁止）', value: 'compat' },
 ]
 
 export default function SettingsModal() {
@@ -73,6 +79,8 @@ export default function SettingsModal() {
       responsesTransport: nextDraft.responsesTransport || DEFAULT_SETTINGS.responsesTransport,
       responsesImageInputMode:
         nextDraft.responsesImageInputMode || DEFAULT_SETTINGS.responsesImageInputMode,
+      responsesPromptRevisionMode:
+        nextDraft.responsesPromptRevisionMode || DEFAULT_SETTINGS.responsesPromptRevisionMode,
       timeout: Number(nextDraft.timeout) || DEFAULT_SETTINGS.timeout,
       apiProtocol: nextDraft.apiProtocol || DEFAULT_SETTINGS.apiProtocol,
       requestMode: nextDraft.requestMode || DEFAULT_SETTINGS.requestMode,
@@ -394,6 +402,30 @@ export default function SettingsModal() {
                 <div className="mt-1 text-[10px] text-gray-400 dark:text-gray-500">
                   <div>自动：公网图继续传 URL，本地图以内联 data URL 发送，兼容性最好。</div>
                   <div><code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">file_id</code>：会先请求 <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">/v1/files</code>，只有中转站明确支持文件上传时再用。</div>
+                </div>
+              </label>
+
+              <label className="block">
+                <span className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Responses 提示词修订模式</span>
+                <Select
+                  value={draft.responsesPromptRevisionMode}
+                  onChange={(value) =>
+                    commitSettings({
+                      ...draft,
+                      responsesPromptRevisionMode: value as ResponsesPromptRevisionMode,
+                    })
+                  }
+                  options={RESPONSES_PROMPT_REVISION_MODE_OPTIONS}
+                  className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
+                />
+                <div className="mt-1 text-[10px] text-gray-400 dark:text-gray-500">
+                  <div>仅 Responses API 生效。</div>
+                  <div>允许：正常发送提示词，接受模型修订。</div>
+                  <div>禁止（软禁止）：自动在原提示词前加入“不要改写原提示词”的前置约束，再发送给 Responses。</div>
+                  <div>
+                    支持通过查询参数覆盖：
+                    <code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded ml-1">?responsesPromptRevisionMode=allow|compat</code>
+                  </div>
                 </div>
               </label>
 

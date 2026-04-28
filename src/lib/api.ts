@@ -3,10 +3,18 @@ import type {
   AppSettings,
   ImageApiResponse,
   ResponsesImageInputMode,
+  ResponsesPromptRevisionMode,
   ResponsesTransportMode,
+  TaskErrorDebugInfo,
+  TaskResponseMeta,
   TaskParams,
 } from '../types'
-import { buildApiUrl, normalizeProxyTargetBaseUrl, readClientDevProxyConfig } from './devProxy'
+import {
+  DEV_PROXY_REQUEST_ID_HEADER,
+  buildApiUrl,
+  normalizeProxyTargetBaseUrl,
+  readClientDevProxyConfig,
+} from './devProxy'
 
 const MIME_MAP: Record<string, string> = {
   png: 'image/png',
@@ -20,6 +28,14 @@ const RESPONSES_INLINE_IMAGE_TOTAL_TARGET_BYTES = 1500 * 1024
 const RESPONSES_INLINE_IMAGE_MIN_TARGET_BYTES = 220 * 1024
 const RESPONSES_INLINE_IMAGE_MIN_DIMENSION = 768
 const RESPONSES_INLINE_IMAGE_MIN_QUALITY = 0.55
+const DEBUG_STRING_PREVIEW_LIMIT = 1200
+const DEBUG_ARRAY_ITEM_LIMIT = 10
+const DEBUG_OBJECT_KEY_LIMIT = 30
+const RESPONSES_PROMPT_REVISION_COMPAT_PREFIX = [
+  '兼容模式要求：不要改写、重排、总结、翻译、润色或省略下面的“原始提示词”内容。',
+  '请保留原始提示词中的段落结构、列表、标签、代码块、正向/负向要求、参数描述与措辞重点，并尽量按原文语义直接执行。',
+  '原始提示词如下：',
+].join('\n')
 
 export { normalizeBaseUrl } from './devProxy'
 
@@ -299,18 +315,249 @@ export interface CallApiOptions {
 export interface CallApiResult {
   /** base64 data URL 列表 */
   images: string[]
+  /** API 实际返回的图片生成元信息 */
+  responseMeta?: TaskResponseMeta
 }
 
 type ApiError = Error & {
   status?: number
+  requestId?: string
+  details?: unknown
 }
 
-function createApiError(message: string, status?: number): ApiError {
+type ApiDebugRequestLogEntry = NonNullable<TaskErrorDebugInfo['requestLog']>[number]
+type ApiDebugRequestSnapshot = NonNullable<TaskErrorDebugInfo['request']>
+
+function createApiError(
+  message: string,
+  status?: number,
+  extras?: Partial<Pick<ApiError, 'requestId' | 'details'>>,
+): ApiError {
   const error = new Error(message) as ApiError
   if (status != null) {
     error.status = status
   }
+  if (extras?.requestId) {
+    error.requestId = extras.requestId
+  }
+  if (extras?.details !== undefined) {
+    error.details = extras.details
+  }
   return error
+}
+
+function readDevProxyRequestId(headers: Headers): string | undefined {
+  const requestId = headers.get(DEV_PROXY_REQUEST_ID_HEADER)?.trim()
+  return requestId || undefined
+}
+
+function summarizeDebugString(value: string): string {
+  if (/^Bearer\s+/i.test(value)) {
+    return '[REDACTED_BEARER_TOKEN]'
+  }
+
+  if (value.startsWith('data:')) {
+    const mime = /^data:([^;,]+)[^,]*,/.exec(value)?.[1] || 'unknown'
+    return `[data-url mime=${mime} length=${value.length}]`
+  }
+
+  if (/^[A-Za-z0-9+/=]{600,}$/.test(value)) {
+    return `[base64 length=${value.length}]`
+  }
+
+  if (value.length > DEBUG_STRING_PREVIEW_LIMIT) {
+    return `${value.slice(0, DEBUG_STRING_PREVIEW_LIMIT)}...[truncated ${value.length - DEBUG_STRING_PREVIEW_LIMIT} chars]`
+  }
+
+  return value
+}
+
+function sanitizeDebugValue(value: unknown, depth = 0): unknown {
+  if (value == null || typeof value === 'boolean' || typeof value === 'number') {
+    return value
+  }
+
+  if (typeof value === 'string') {
+    return summarizeDebugString(value)
+  }
+
+  if (depth >= 5) {
+    return '[max-depth-reached]'
+  }
+
+  if (Array.isArray(value)) {
+    const items = value
+      .slice(0, DEBUG_ARRAY_ITEM_LIMIT)
+      .map((item) => sanitizeDebugValue(item, depth + 1))
+
+    if (value.length > DEBUG_ARRAY_ITEM_LIMIT) {
+      items.push(`[+${value.length - DEBUG_ARRAY_ITEM_LIMIT} more items]`)
+    }
+
+    return items
+  }
+
+  if (isRecord(value)) {
+    const entries = Object.entries(value)
+    const nextValue = Object.fromEntries(
+      entries
+        .slice(0, DEBUG_OBJECT_KEY_LIMIT)
+        .map(([key, nestedValue]) => [key, sanitizeDebugValue(nestedValue, depth + 1)] as const),
+    )
+
+    if (entries.length > DEBUG_OBJECT_KEY_LIMIT) {
+      nextValue.__truncatedKeys = entries.length - DEBUG_OBJECT_KEY_LIMIT
+    }
+
+    return nextValue
+  }
+
+  return String(value)
+}
+
+function summarizeRequestHeadersForDebug(headers: Record<string, string>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(headers).map(([key, value]) => [
+      key,
+      /authorization|api[-_]?key|token|secret|password/i.test(key)
+        ? '[REDACTED]'
+        : summarizeDebugString(value),
+    ]),
+  )
+}
+
+function summarizeInputImageForDebug(
+  value: string,
+  index: number,
+): NonNullable<ApiDebugRequestSnapshot['inputImages']>[number] {
+  if (isDataUrl(value)) {
+    const mime = /^data:([^;,]+)[^,]*,/.exec(value)?.[1] || null
+    return {
+      index,
+      kind: 'data_url',
+      mime,
+      sizeBytes: getDataUrlByteSize(value),
+    }
+  }
+
+  if (isHttpUrl(value)) {
+    return {
+      index,
+      kind: 'remote_url',
+      url: value,
+    }
+  }
+
+  return {
+    index,
+    kind: 'unknown',
+  }
+}
+
+function summarizeMaskForDebug(
+  value: string | undefined,
+): NonNullable<ApiDebugRequestSnapshot['editMask']> {
+  if (!value) {
+    return {
+      present: false,
+      kind: 'unknown',
+    }
+  }
+
+  const baseSummary = summarizeInputImageForDebug(value, 0)
+  return {
+    ...baseSummary,
+    present: true,
+  }
+}
+
+function buildLocalDebugRequestSnapshot(opts: CallApiOptions): ApiDebugRequestSnapshot {
+  return {
+    baseUrl: opts.settings.baseUrl,
+    requestMode: opts.settings.requestMode,
+    apiProtocol: getApiProtocol(opts.settings),
+    model: opts.settings.model,
+    responsesImageModel: opts.settings.responsesImageModel || null,
+    responsesTransport: opts.settings.responsesTransport || null,
+    responsesImageInputMode: opts.settings.responsesImageInputMode || null,
+    responsesPromptRevisionMode: opts.settings.responsesPromptRevisionMode || null,
+    prompt: opts.prompt,
+    params: opts.params,
+    inputImages: opts.inputImageDataUrls.map((value, index) => summarizeInputImageForDebug(value, index)),
+    editMask: summarizeMaskForDebug(opts.editMaskDataUrl),
+  }
+}
+
+function createDebugRequestLogEntry(
+  ctx: SharedRequestContext,
+  stage: string,
+  method: string,
+  url: string,
+  requestBody?: unknown,
+): ApiDebugRequestLogEntry {
+  const entry: ApiDebugRequestLogEntry = {
+    stage,
+    method,
+    url,
+    requestHeaders: summarizeRequestHeadersForDebug(ctx.requestHeaders),
+    requestBody: requestBody === undefined ? null : sanitizeDebugValue(requestBody),
+    responseStatus: null,
+    responseRequestId: null,
+    responseBody: null,
+    responseText: null,
+  }
+  ctx.debugLog.push(entry)
+  return entry
+}
+
+function attachDebugResponseMeta(entry: ApiDebugRequestLogEntry | undefined, response: Response): string | undefined {
+  const requestId = readDevProxyRequestId(response.headers)
+  if (entry) {
+    entry.responseStatus = response.status
+    entry.responseRequestId = requestId || null
+  }
+  return requestId
+}
+
+function attachLocalDebugToError(
+  error: unknown,
+  opts: CallApiOptions,
+  requestLog: ApiDebugRequestLogEntry[],
+): ApiError {
+  const apiError =
+    error instanceof Error ? (error as ApiError) : createApiError(typeof error === 'string' ? error : String(error))
+
+  if (isRecord(apiError.details) && isRecord(apiError.details.localDebug)) {
+    return apiError
+  }
+
+  const localDebug: TaskErrorDebugInfo = {
+    createdAt: Date.now(),
+    requestId: apiError.requestId || null,
+    status: typeof apiError.status === 'number' ? apiError.status : null,
+    requestMode: opts.settings.requestMode,
+    apiProtocol: getApiProtocol(opts.settings),
+    baseUrl: opts.settings.baseUrl,
+    model: opts.settings.model,
+    responsesImageModel: opts.settings.responsesImageModel || null,
+    responsesTransport: opts.settings.responsesTransport || null,
+    responsesImageInputMode: opts.settings.responsesImageInputMode || null,
+    responsesPromptRevisionMode: opts.settings.responsesPromptRevisionMode || null,
+    request: buildLocalDebugRequestSnapshot(opts),
+    requestLog: requestLog.length > 0 ? requestLog : null,
+    failure: {
+      message: apiError.message,
+      status: typeof apiError.status === 'number' ? apiError.status : null,
+      requestId: apiError.requestId || null,
+      details: apiError.details,
+    },
+    details: apiError.details,
+  }
+
+  apiError.details = {
+    localDebug,
+  }
+  return apiError
 }
 
 function tryParseJson(text: string): unknown | undefined {
@@ -411,31 +658,55 @@ function extractErrorMessage(payload: unknown): string | null {
   return null
 }
 
-async function buildApiErrorFromResponse(response: Response): Promise<ApiError> {
+async function buildApiErrorFromResponse(
+  response: Response,
+  logEntry?: ApiDebugRequestLogEntry,
+): Promise<ApiError> {
+  const requestId = attachDebugResponseMeta(logEntry, response)
   if (response.status === 524) {
     return createApiError(
       '上游站点处理超时（Cloudflare 524）。如果这次带了本地参考图，请优先改用公网图片 URL；若中转站支持 Responses 流式传输，也可优先启用 stream 模式后重试。',
       524,
+      { requestId },
     )
   }
 
   let errorMsg = `HTTP ${response.status}`
+  let responseBody: unknown = undefined
+  let responseText: string | undefined
 
   try {
-    const payload = await response.json()
-    errorMsg = extractErrorMessage(payload) || errorMsg
-  } catch {
-    try {
-      const text = await response.text()
-      if (text.trim()) {
-        errorMsg = text
+    const text = await response.text()
+    const parsedPayload = tryParseJson(text)
+    if (parsedPayload !== undefined) {
+      responseBody = parsedPayload
+      if (logEntry) {
+        logEntry.responseBody = sanitizeDebugValue(parsedPayload)
       }
-    } catch {
-      /* ignore */
+      errorMsg = extractErrorMessage(parsedPayload) || errorMsg
+    } else if (text.trim()) {
+      responseText = text
+      if (logEntry) {
+        logEntry.responseText = summarizeDebugString(text)
+      }
+      errorMsg = text
     }
+  } catch {
+    /* ignore */
   }
 
-  return createApiError(errorMsg, response.status)
+  const details: Record<string, unknown> = {}
+  if (responseBody !== undefined) {
+    details.responseBody = responseBody
+  }
+  if (responseText?.trim()) {
+    details.responseText = responseText
+  }
+
+  return createApiError(errorMsg, response.status, {
+    requestId,
+    details: Object.keys(details).length > 0 ? details : undefined,
+  })
 }
 
 async function appendImageFromItem(
@@ -474,6 +745,176 @@ async function appendImageFromItem(
       await appendImageFromItem(images, contentItem, fallbackMime, signal)
     }
   }
+}
+
+interface ResponseImageGenerationCallMeta {
+  id?: string
+  status?: string
+  size?: string
+  quality?: string
+  output_format?: string
+  background?: string
+  action?: string
+  revised_prompt?: string
+}
+
+function readOptionalText(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value : null
+}
+
+function extractImageGenerationCallMeta(item: Record<string, unknown>): ResponseImageGenerationCallMeta | null {
+  if (item.type !== 'image_generation_call') {
+    return null
+  }
+
+  const call: ResponseImageGenerationCallMeta = {}
+
+  const id = readOptionalText(item.id)
+  if (id) call.id = id
+
+  const status = readOptionalText(item.status)
+  if (status) call.status = status
+
+  const size = readOptionalText(item.size)
+  if (size) call.size = size
+
+  const quality = readOptionalText(item.quality)
+  if (quality) call.quality = quality
+
+  const outputFormat = readOptionalText(item.output_format)
+  if (outputFormat) call.output_format = outputFormat
+
+  const background = readOptionalText(item.background)
+  if (background) call.background = background
+
+  const action = readOptionalText(item.action)
+  if (action) call.action = action
+
+  const revisedPrompt = readOptionalText(item.revised_prompt)
+  if (revisedPrompt) call.revised_prompt = revisedPrompt
+
+  return Object.keys(call).length > 0 ? call : {}
+}
+
+function appendImageGenerationCallsFromItem(
+  calls: ResponseImageGenerationCallMeta[],
+  item: unknown,
+) {
+  if (!isRecord(item)) return
+
+  const call = extractImageGenerationCallMeta(item)
+  if (call) {
+    calls.push(call)
+  }
+
+  const content = item.content
+  if (Array.isArray(content)) {
+    for (const contentItem of content) {
+      appendImageGenerationCallsFromItem(calls, contentItem)
+    }
+  }
+}
+
+function dedupeImageGenerationCalls(
+  calls: ResponseImageGenerationCallMeta[],
+): ResponseImageGenerationCallMeta[] {
+  const seen = new Set<string>()
+  const deduped: ResponseImageGenerationCallMeta[] = []
+
+  for (const call of calls) {
+    const signature = JSON.stringify(call)
+    if (seen.has(signature)) continue
+    seen.add(signature)
+    deduped.push(call)
+  }
+
+  return deduped
+}
+
+function collectImageGenerationCallsFromPayload(payload: unknown): ResponseImageGenerationCallMeta[] {
+  const calls: ResponseImageGenerationCallMeta[] = []
+  if (!isRecord(payload)) return calls
+
+  const data = payload.data
+  if (Array.isArray(data)) {
+    for (const item of data) {
+      appendImageGenerationCallsFromItem(calls, item)
+    }
+  }
+
+  const output = payload.output
+  if (Array.isArray(output)) {
+    for (const item of output) {
+      appendImageGenerationCallsFromItem(calls, item)
+    }
+  }
+
+  const item = payload.item
+  if (isRecord(item)) {
+    appendImageGenerationCallsFromItem(calls, item)
+  }
+
+  const response = payload.response
+  if (isRecord(response)) {
+    calls.push(...collectImageGenerationCallsFromPayload(response))
+  }
+
+  return dedupeImageGenerationCalls(calls)
+}
+
+function summarizeImageGenerationCallValue(
+  calls: ResponseImageGenerationCallMeta[],
+  key: keyof NonNullable<TaskResponseMeta['appliedImageParams']>,
+): string | null {
+  const values = Array.from(
+    new Set(
+      calls
+        .map((call) => readOptionalText(call[key]))
+        .filter((value): value is string => Boolean(value)),
+    ),
+  )
+
+  if (!values.length) return null
+  return values.join(' / ')
+}
+
+function buildTaskResponseMetaFromCalls(
+  calls: ResponseImageGenerationCallMeta[],
+): TaskResponseMeta | undefined {
+  const normalizedCalls = dedupeImageGenerationCalls(calls)
+  if (!normalizedCalls.length) return undefined
+
+  const appliedImageParams: NonNullable<TaskResponseMeta['appliedImageParams']> = {}
+
+  const size = summarizeImageGenerationCallValue(normalizedCalls, 'size')
+  if (size) appliedImageParams.size = size
+
+  const quality = summarizeImageGenerationCallValue(normalizedCalls, 'quality')
+  if (quality) appliedImageParams.quality = quality
+
+  const outputFormat = summarizeImageGenerationCallValue(normalizedCalls, 'output_format')
+  if (outputFormat) appliedImageParams.output_format = outputFormat
+
+  const background = summarizeImageGenerationCallValue(normalizedCalls, 'background')
+  if (background) appliedImageParams.background = background
+
+  const action = summarizeImageGenerationCallValue(normalizedCalls, 'action')
+  if (action) appliedImageParams.action = action
+
+  const revisedPrompt =
+    normalizedCalls
+      .map((call) => readOptionalText(call.revised_prompt))
+      .find((value): value is string => Boolean(value)) ?? null
+
+  const responseMeta: TaskResponseMeta = {}
+  if (Object.keys(appliedImageParams).length > 0) {
+    responseMeta.appliedImageParams = appliedImageParams
+  }
+  if (revisedPrompt) {
+    responseMeta.revisedPrompt = revisedPrompt
+  }
+
+  return Object.keys(responseMeta).length > 0 ? responseMeta : undefined
 }
 
 async function parseImagesFromPayload(
@@ -531,6 +972,7 @@ interface SharedRequestContext {
   proxyConfig: ReturnType<typeof readClientDevProxyConfig>
   mime: string
   forceProxy: boolean
+  debugLog: ApiDebugRequestLogEntry[]
 }
 
 interface ResponsesInputImage {
@@ -578,6 +1020,23 @@ function getResponsesTransportMode(settings: AppSettings): ResponsesTransportMod
 
 function getResponsesImageInputMode(settings: AppSettings): ResponsesImageInputMode {
   return settings.responsesImageInputMode || 'auto'
+}
+
+function getResponsesPromptRevisionMode(settings: AppSettings): ResponsesPromptRevisionMode {
+  return settings.responsesPromptRevisionMode === 'compat' ? 'compat' : 'allow'
+}
+
+function buildResponsesPrompt(prompt: string, settings: AppSettings): string {
+  if (getResponsesPromptRevisionMode(settings) !== 'compat') {
+    return prompt
+  }
+
+  const trimmedPrompt = prompt.trim()
+  if (!trimmedPrompt) {
+    return prompt
+  }
+
+  return `${RESPONSES_PROMPT_REVISION_COMPAT_PREFIX}\n\n${prompt}`
 }
 
 function buildRequestUrl(baseUrl: string, path: string, ctx: SharedRequestContext): string {
@@ -663,16 +1122,29 @@ function shouldRetryResponsesWithFileId(
   return opts.inputImageDataUrls.some((value) => isDataUrl(value)) || Boolean(opts.editMaskDataUrl)
 }
 
-async function readResponsesPayload(response: Response): Promise<unknown> {
+async function readResponsesPayload(
+  response: Response,
+  logEntry?: ApiDebugRequestLogEntry,
+): Promise<unknown> {
   const text = await response.text()
+  const requestId = attachDebugResponseMeta(logEntry, response)
   const directJson = tryParseJson(text)
   if (directJson !== undefined) {
+    if (logEntry) {
+      logEntry.responseBody = sanitizeDebugValue(directJson)
+    }
     return directJson
   }
 
   const sseEvents = parseSseEvents(text)
   if (!sseEvents.length) {
-    throw createApiError('Responses API 返回了非 JSON 响应，且不是可解析的 SSE 数据', response.status)
+    if (logEntry && text.trim()) {
+      logEntry.responseText = summarizeDebugString(text)
+    }
+    throw createApiError('Responses API 返回了非 JSON 响应，且不是可解析的 SSE 数据', response.status, {
+      requestId,
+      details: text.trim() ? { responseText: text } : undefined,
+    })
   }
 
   const jsonPayloads = sseEvents
@@ -694,7 +1166,15 @@ async function readResponsesPayload(response: Response): Promise<unknown> {
       extractErrorMessage(failedPayload) ||
       (nestedResponse ? extractErrorMessage(nestedResponse) : null) ||
       'Responses API 处理失败'
-    throw createApiError(message, response.status)
+    if (logEntry) {
+      logEntry.responseBody = sanitizeDebugValue(failedPayload)
+    }
+    throw createApiError(message, response.status, {
+      requestId,
+      details: {
+        responseBody: failedPayload,
+      },
+    })
   }
 
   const completedPayload = [...jsonPayloads].reverse().find(
@@ -721,10 +1201,19 @@ async function readResponsesPayload(response: Response): Promise<unknown> {
 
   const lastJsonPayload = [...jsonPayloads].reverse().find(Boolean)
   if (lastJsonPayload) {
+    if (logEntry) {
+      logEntry.responseBody = sanitizeDebugValue(lastJsonPayload)
+    }
     return lastJsonPayload
   }
 
-  throw createApiError('Responses API 返回了 SSE，但未包含可解析的 JSON 事件', response.status)
+  if (logEntry && text.trim()) {
+    logEntry.responseText = summarizeDebugString(text)
+  }
+  throw createApiError('Responses API 返回了 SSE，但未包含可解析的 JSON 事件', response.status, {
+    requestId,
+    details: text.trim() ? { responseText: text } : undefined,
+  })
 }
 
 async function callImagesApi(
@@ -734,6 +1223,7 @@ async function callImagesApi(
   const { settings, prompt, params, inputImageDataUrls, editMaskDataUrl } = opts
   const isEdit = inputImageDataUrls.length > 0
   let response: Response
+  let debugLogEntry: ApiDebugRequestLogEntry | undefined
 
   if (isEdit) {
     const formData = new FormData()
@@ -759,7 +1249,20 @@ async function callImagesApi(
       formData.append('mask', maskBlob, 'mask.png')
     }
 
-    response = await fetch(buildRequestUrl(settings.baseUrl, 'images/edits', ctx), {
+    const requestUrl = buildRequestUrl(settings.baseUrl, 'images/edits', ctx)
+    debugLogEntry = createDebugRequestLogEntry(ctx, 'images.edit', 'POST', requestUrl, {
+      model: settings.model,
+      prompt,
+      size: params.size,
+      quality: params.quality,
+      output_format: params.output_format,
+      moderation: params.moderation,
+      output_compression: params.output_format !== 'png' ? params.output_compression : undefined,
+      imageCount: inputImageDataUrls.length,
+      hasMask: Boolean(editMaskDataUrl),
+    })
+
+    response = await fetch(requestUrl, {
       method: 'POST',
       headers: ctx.requestHeaders,
       cache: 'no-store',
@@ -783,7 +1286,10 @@ async function callImagesApi(
       body.n = params.n
     }
 
-    response = await fetch(buildRequestUrl(settings.baseUrl, 'images/generations', ctx), {
+    const requestUrl = buildRequestUrl(settings.baseUrl, 'images/generations', ctx)
+    debugLogEntry = createDebugRequestLogEntry(ctx, 'images.generate', 'POST', requestUrl, body)
+
+    response = await fetch(requestUrl, {
       method: 'POST',
       headers: {
         ...ctx.requestHeaders,
@@ -796,13 +1302,22 @@ async function callImagesApi(
   }
 
   if (!response.ok) {
-    throw await buildApiErrorFromResponse(response)
+    throw await buildApiErrorFromResponse(response, debugLogEntry)
   }
 
+  attachDebugResponseMeta(debugLogEntry, response)
   const payload = await response.json() as ImageApiResponse
   const images = await parseImagesFromPayload(payload, ctx.mime, ctx.controller.signal)
   if (!images.length) {
-    throw createApiError('接口未返回可用图片数据', response.status)
+    if (debugLogEntry) {
+      debugLogEntry.responseBody = sanitizeDebugValue(payload)
+    }
+    throw createApiError('接口未返回可用图片数据', response.status, {
+      requestId: readDevProxyRequestId(response.headers),
+      details: {
+        responseBody: payload,
+      },
+    })
   }
 
   return { images }
@@ -819,8 +1334,16 @@ async function uploadInputImageAsFileId(
   const formData = new FormData()
   formData.append('purpose', 'vision')
   formData.append('file', blob, `input-${index + 1}.${ext}`)
+  const requestUrl = buildRequestUrl(baseUrl, 'files', ctx)
+  const debugLogEntry = createDebugRequestLogEntry(ctx, 'files.upload', 'POST', requestUrl, {
+    purpose: 'vision',
+    index,
+    fileName: `input-${index + 1}.${ext}`,
+    mime: blob.type || null,
+    sizeBytes: blob.size,
+  })
 
-  const response = await fetch(buildRequestUrl(baseUrl, 'files', ctx), {
+  const response = await fetch(requestUrl, {
     method: 'POST',
     headers: ctx.requestHeaders,
     cache: 'no-store',
@@ -829,12 +1352,19 @@ async function uploadInputImageAsFileId(
   })
 
   if (!response.ok) {
-    throw await buildApiErrorFromResponse(response)
+    throw await buildApiErrorFromResponse(response, debugLogEntry)
   }
 
+  attachDebugResponseMeta(debugLogEntry, response)
   const payload = await response.json()
   if (!isRecord(payload) || typeof payload.id !== 'string' || !payload.id) {
-    throw createApiError('文件上传成功，但未返回 file_id')
+    debugLogEntry.responseBody = sanitizeDebugValue(payload)
+    throw createApiError('文件上传成功，但未返回 file_id', response.status, {
+      requestId: readDevProxyRequestId(response.headers),
+      details: {
+        responseBody: payload,
+      },
+    })
   }
 
   return payload.id
@@ -1132,6 +1662,7 @@ function buildResponsesBody(
   plan: ResponsesRequestPlan,
 ): Record<string, unknown> {
   const { settings, prompt, params } = opts
+  const responsesPrompt = buildResponsesPrompt(prompt, settings)
   const hasReferenceImages = inputImages.length > 0
   const tool: Record<string, unknown> = {
     type: 'image_generation',
@@ -1165,7 +1696,7 @@ function buildResponsesBody(
 
   const body: Record<string, unknown> = {
     model: settings.model,
-    input: buildResponsesInputPayload(prompt, inputImages, plan.inputPayloadMode),
+    input: buildResponsesInputPayload(responsesPrompt, inputImages, plan.inputPayloadMode),
     tools: [tool],
   }
 
@@ -1215,6 +1746,7 @@ async function callResponsesApiWithInputMode(
 ): Promise<CallApiResult> {
   const requestCount = Math.max(1, opts.params.n || 1)
   const images: string[] = []
+  const responseImageGenerationCalls: ResponseImageGenerationCallMeta[] = []
   const preparedEditAssets = await prepareResponsesInlineEditAssets(opts, responsesImageInputMode)
   const { inputImages, uploadedFileIds } = await prepareResponsesInputImages(
     opts.settings.baseUrl,
@@ -1241,25 +1773,42 @@ async function callResponsesApiWithInputMode(
         const nextPlan = requestPlans[planIndex + 1]
 
         try {
-          const response = await fetch(buildRequestUrl(opts.settings.baseUrl, 'responses', ctx), {
+          const requestUrl = buildRequestUrl(opts.settings.baseUrl, 'responses', ctx)
+          const requestBody = buildResponsesBody(opts, inputImages, editMask, plan)
+          const debugLogEntry = createDebugRequestLogEntry(
+            ctx,
+            `responses.${plan.id}`,
+            'POST',
+            requestUrl,
+            requestBody,
+          )
+          const response = await fetch(requestUrl, {
             method: 'POST',
             headers: {
               ...ctx.requestHeaders,
               'Content-Type': 'application/json',
             },
             cache: 'no-store',
-            body: JSON.stringify(buildResponsesBody(opts, inputImages, editMask, plan)),
+            body: JSON.stringify(requestBody),
             signal: ctx.controller.signal,
           })
 
           if (!response.ok) {
-            throw await buildApiErrorFromResponse(response)
+            throw await buildApiErrorFromResponse(response, debugLogEntry)
           }
 
-          const payload = await readResponsesPayload(response)
+          const requestId = attachDebugResponseMeta(debugLogEntry, response)
+          const payload = await readResponsesPayload(response, debugLogEntry)
+          responseImageGenerationCalls.push(...collectImageGenerationCallsFromPayload(payload))
           const parsedImages = await parseImagesFromPayload(payload, ctx.mime, ctx.controller.signal)
           if (!parsedImages.length) {
-            throw createApiError('Responses API 未返回可用图片数据')
+            debugLogEntry.responseBody = sanitizeDebugValue(payload)
+            throw createApiError('Responses API 未返回可用图片数据', response.status, {
+              requestId,
+              details: {
+                responseBody: payload,
+              },
+            })
           }
 
           images.push(...parsedImages)
@@ -1290,7 +1839,8 @@ async function callResponsesApiWithInputMode(
     throw createApiError('Responses API 未返回可用图片数据')
   }
 
-  return { images }
+  const responseMeta = buildTaskResponseMetaFromCalls(responseImageGenerationCalls)
+  return responseMeta ? { images, responseMeta } : { images }
 }
 
 export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult> {
@@ -1298,12 +1848,7 @@ export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult>
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
   const forceProxy = settings.requestMode === 'local_proxy'
-
-  if (forceProxy && !proxyConfig?.enabled) {
-    throw createApiError(
-      '本地代理模式已启用，但未检测到可用的开发代理。请确认 dev-proxy.config.json 存在，并重启 npm run dev。',
-    )
-  }
+  const debugLog: ApiDebugRequestLogEntry[] = []
 
   const requestHeaders: Record<string, string> = {
     Authorization: `Bearer ${settings.apiKey}`,
@@ -1311,19 +1856,26 @@ export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult>
     Pragma: 'no-cache',
   }
 
-  if (forceProxy) {
-    const proxyTargetBaseUrl = normalizeProxyTargetBaseUrl(settings.baseUrl)
-    if (!proxyTargetBaseUrl) {
-      throw createApiError('API URL 无效，请检查设置中的 API URL')
-    }
-    requestHeaders['X-Dev-Proxy-Target'] = proxyTargetBaseUrl
-  }
-
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), settings.timeout * 1000)
+  let normalizedOpts = opts
 
   try {
-    const normalizedOpts =
+    if (forceProxy && !proxyConfig?.enabled) {
+      throw createApiError(
+        '本地代理模式已启用，但未检测到可用的开发代理。请确认 dev-proxy.config.json 存在，并重启 npm run dev。',
+      )
+    }
+
+    if (forceProxy) {
+      const proxyTargetBaseUrl = normalizeProxyTargetBaseUrl(settings.baseUrl)
+      if (!proxyTargetBaseUrl) {
+        throw createApiError('API URL 无效，请检查设置中的 API URL')
+      }
+      requestHeaders['X-Dev-Proxy-Target'] = proxyTargetBaseUrl
+    }
+
+    normalizedOpts =
       opts.editMaskDataUrl != null
         ? {
             ...opts,
@@ -1336,6 +1888,7 @@ export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult>
       proxyConfig,
       mime,
       forceProxy,
+      debugLog,
     }
     const apiProtocol = getApiProtocol(settings)
 
@@ -1356,6 +1909,8 @@ export async function callImageApi(opts: CallApiOptions): Promise<CallApiResult>
     }
 
     return await callResponsesApi(normalizedOpts, ctx)
+  } catch (error) {
+    throw attachLocalDebugToError(error, normalizedOpts, debugLog)
   } finally {
     clearTimeout(timeoutId)
   }

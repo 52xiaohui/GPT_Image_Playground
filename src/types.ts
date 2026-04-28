@@ -7,6 +7,7 @@ export interface AppSettings {
   responsesImageModel: string
   responsesTransport: ResponsesTransportMode
   responsesImageInputMode: ResponsesImageInputMode
+  responsesPromptRevisionMode: ResponsesPromptRevisionMode
   timeout: number
   apiProtocol: ApiProtocol
   requestMode: RequestMode
@@ -16,6 +17,7 @@ export type ApiProtocol = 'auto' | 'images' | 'responses'
 export type RequestMode = 'direct' | 'local_proxy'
 export type ResponsesTransportMode = 'auto' | 'stream' | 'json'
 export type ResponsesImageInputMode = 'auto' | 'file_id'
+export type ResponsesPromptRevisionMode = 'allow' | 'compat'
 export type TaskView = 'gallery' | 'trash'
 
 export interface ImageEditSelection {
@@ -62,6 +64,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   responsesImageModel: 'gpt-image-2',
   responsesTransport: 'auto',
   responsesImageInputMode: 'auto',
+  responsesPromptRevisionMode: 'allow',
   timeout: 300,
   apiProtocol: 'auto',
   requestMode: DEFAULT_REQUEST_MODE,
@@ -85,6 +88,79 @@ export const DEFAULT_PARAMS: TaskParams = {
   output_compression: null,
   moderation: 'auto',
   n: 1,
+}
+
+export interface AppliedImageParams {
+  size?: string | null
+  quality?: string | null
+  output_format?: string | null
+  background?: string | null
+  action?: string | null
+}
+
+export interface TaskResponseMeta {
+  appliedImageParams?: AppliedImageParams | null
+  revisedPrompt?: string | null
+}
+
+export interface TaskErrorDebugImageSummary {
+  index?: number
+  kind: 'data_url' | 'remote_url' | 'unknown'
+  mime?: string | null
+  sizeBytes?: number | null
+  url?: string | null
+}
+
+export interface TaskErrorDebugRequestSnapshot {
+  baseUrl: string
+  requestMode: RequestMode
+  apiProtocol: ApiProtocol
+  model: string
+  responsesImageModel?: string | null
+  responsesTransport?: ResponsesTransportMode | null
+  responsesImageInputMode?: ResponsesImageInputMode | null
+  responsesPromptRevisionMode?: ResponsesPromptRevisionMode | null
+  prompt: string
+  params: TaskParams
+  inputImages: TaskErrorDebugImageSummary[]
+  editMask?: (TaskErrorDebugImageSummary & { present: boolean }) | null
+}
+
+export interface TaskErrorDebugRequestLogEntry {
+  stage: string
+  method: string
+  url: string
+  requestHeaders?: Record<string, unknown> | null
+  requestBody?: unknown
+  responseStatus?: number | null
+  responseRequestId?: string | null
+  responseBody?: unknown
+  responseText?: string | null
+}
+
+export interface TaskErrorDebugFailure {
+  message: string
+  status?: number | null
+  requestId?: string | null
+  details?: unknown
+}
+
+export interface TaskErrorDebugInfo {
+  createdAt?: number
+  requestId?: string | null
+  status?: number | null
+  requestMode?: RequestMode
+  apiProtocol?: ApiProtocol
+  baseUrl?: string
+  model?: string
+  responsesImageModel?: string | null
+  responsesTransport?: ResponsesTransportMode | null
+  responsesImageInputMode?: ResponsesImageInputMode | null
+  responsesPromptRevisionMode?: ResponsesPromptRevisionMode | null
+  request?: TaskErrorDebugRequestSnapshot | null
+  requestLog?: TaskErrorDebugRequestLogEntry[] | null
+  failure?: TaskErrorDebugFailure | null
+  details?: unknown
 }
 
 // ===== 输入图片（UI 层面） =====
@@ -133,6 +209,10 @@ export interface TaskRecord {
   editSelection?: ImageEditSelection | null
   /** 输出图片的 image store id 列表 */
   outputImages: string[]
+  /** API 返回的实际生效图片参数与附加元信息 */
+  responseMeta?: TaskResponseMeta | null
+  /** 失败时记录的请求与响应调试上下文 */
+  errorDebug?: TaskErrorDebugInfo | null
   status: TaskStatus
   error: string | null
   createdAt: number
@@ -175,6 +255,26 @@ export interface ImageResponseItem {
 
 export interface ImageApiResponse {
   data: ImageResponseItem[]
+}
+
+type DisplayTaskImageParamKey = keyof Pick<TaskParams, 'size' | 'quality' | 'output_format'>
+
+function normalizeOptionalText(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value : null
+}
+
+export function resolveTaskAppliedImageParam(
+  task: Pick<TaskRecord, 'responseMeta'>,
+  key: keyof AppliedImageParams,
+): string | null {
+  return normalizeOptionalText(task.responseMeta?.appliedImageParams?.[key])
+}
+
+export function resolveTaskDisplayImageParam(
+  task: Pick<TaskRecord, 'params' | 'responseMeta'>,
+  key: DisplayTaskImageParamKey,
+): string {
+  return resolveTaskAppliedImageParam(task, key) ?? task.params[key]
 }
 
 // ===== 导出数据 =====

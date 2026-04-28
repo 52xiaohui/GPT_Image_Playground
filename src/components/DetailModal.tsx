@@ -13,7 +13,9 @@ import { useCloseOnEscape } from '../hooks/useCloseOnEscape'
 import { formatImageRatio } from '../lib/size'
 import {
   isTaskInRecycleBin,
+  resolveTaskAppliedImageParam,
   resolveTaskCategoryName,
+  resolveTaskDisplayImageParam,
   resolveTaskProviderName,
 } from '../types'
 
@@ -128,6 +130,14 @@ export default function DetailModal() {
   const inRecycleBin = isTaskInRecycleBin(task)
   const cleanupDueAt = inRecycleBin ? (task.deletedAt ?? 0) + RECYCLE_BIN_RETENTION_MS : null
   const isFavorite = Boolean(task.isFavorite)
+  const displayQuality = resolveTaskDisplayImageParam(task, 'quality')
+  const displayOutputFormat = resolveTaskDisplayImageParam(task, 'output_format')
+  const appliedSize = resolveTaskAppliedImageParam(task, 'size')
+  const appliedQuality = resolveTaskAppliedImageParam(task, 'quality')
+  const appliedOutputFormat = resolveTaskAppliedImageParam(task, 'output_format')
+  const appliedBackground = resolveTaskAppliedImageParam(task, 'background')
+  const appliedAction = resolveTaskAppliedImageParam(task, 'action')
+  const revisedPrompt = task.responseMeta?.revisedPrompt?.trim() || ''
 
   const formatTime = (ts: number | null) => {
     if (!ts) return ''
@@ -141,6 +151,39 @@ export default function DetailModal() {
     const ss = String(seconds % 60).padStart(2, '0')
     return `${mm}:${ss}`
   }
+
+  const renderRequestedParamCard = (
+    label: string,
+    requestedValue: string,
+    displayValue: string,
+    appliedValue: string | null,
+  ) => {
+    const showRequestedValue = Boolean(appliedValue && appliedValue !== requestedValue)
+
+    return (
+      <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2">
+        <span className="text-gray-400 dark:text-gray-500">{label}</span>
+        <br />
+        <span className="text-gray-700 dark:text-gray-300 font-medium break-all">{displayValue}</span>
+        {showRequestedValue && (
+          <>
+            <br />
+            <span className="text-[11px] text-gray-400 dark:text-gray-500 break-all">
+              请求: {requestedValue}
+            </span>
+          </>
+        )}
+      </div>
+    )
+  }
+
+  const renderValueCard = (label: string, value: string) => (
+    <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2">
+      <span className="text-gray-400 dark:text-gray-500">{label}</span>
+      <br />
+      <span className="text-gray-700 dark:text-gray-300 font-medium break-all">{value}</span>
+    </div>
+  )
 
   const handleReuse = () => {
     reuseConfig(task)
@@ -177,10 +220,37 @@ export default function DetailModal() {
   }
 
   const handleCopyError = async () => {
-    const errorText = task.error || '生成失败'
+    const errorPayload = {
+      copiedAt: new Date().toISOString(),
+      task: {
+        id: task.id,
+        providerId: task.providerId ?? null,
+        providerName,
+        categoryId: task.categoryId ?? null,
+        categoryName,
+        status: task.status,
+        error: task.error || '生成失败',
+        createdAt: task.createdAt,
+        finishedAt: task.finishedAt,
+        elapsed: task.elapsed,
+        prompt: task.prompt,
+        params: task.params,
+        inputImageIds: task.inputImageIds,
+        outputImages: task.outputImages,
+        editMaskImageId: task.editMaskImageId ?? null,
+        editSourceImageId: task.editSourceImageId ?? null,
+        editSelection: task.editSelection ?? null,
+        responseMeta: task.responseMeta ?? null,
+      },
+      localErrorLog: task.errorDebug ?? null,
+      note: task.errorDebug
+        ? null
+        : '本地完整错误日志不存在，可能是旧任务，或该日志已超过 7 天被自动清理。',
+    }
+
     try {
-      await navigator.clipboard.writeText(errorText)
-      showToast('完整报错已复制', 'success')
+      await navigator.clipboard.writeText(JSON.stringify(errorPayload, null, 2))
+      showToast(task.errorDebug ? '完整报错已复制' : '已复制可用报错信息', 'success')
     } catch {
       showToast('复制报错失败', 'error')
     }
@@ -402,6 +472,17 @@ export default function DetailModal() {
               {task.prompt || '(无提示词)'}
             </p>
 
+            {revisedPrompt && revisedPrompt !== task.prompt && (
+              <div className="mb-4 rounded-xl border border-blue-100 bg-blue-50/70 px-3 py-2 dark:border-blue-500/20 dark:bg-blue-500/10">
+                <h3 className="text-xs font-medium text-blue-500 dark:text-blue-300 uppercase tracking-wider mb-1">
+                  模型修订提示词
+                </h3>
+                <p className="text-sm text-blue-700 dark:text-blue-100 whitespace-pre-wrap break-words">
+                  {revisedPrompt}
+                </p>
+              </div>
+            )}
+
             {/* 参考图 */}
             {task.inputImageIds?.length > 0 && (
               <div className="mb-4">
@@ -458,21 +539,31 @@ export default function DetailModal() {
                 <br />
                 <span className="text-gray-700 dark:text-gray-300 font-medium break-all">{providerName}</span>
               </div>
-              <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2">
-                <span className="text-gray-400 dark:text-gray-500">尺寸</span>
-                <br />
-                <span className="text-gray-700 dark:text-gray-300 font-medium">{task.params.size}</span>
-              </div>
-              <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2">
-                <span className="text-gray-400 dark:text-gray-500">质量</span>
-                <br />
-                <span className="text-gray-700 dark:text-gray-300 font-medium">{task.params.quality}</span>
-              </div>
-              <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2">
-                <span className="text-gray-400 dark:text-gray-500">格式</span>
-                <br />
-                <span className="text-gray-700 dark:text-gray-300 font-medium">{task.params.output_format}</span>
-              </div>
+              {task.status === 'done' && currentImageSize
+                ? renderValueCard('输出像素', currentImageSize)
+                : renderValueCard('请求尺寸', task.params.size)}
+              {appliedSize && appliedSize !== currentImageSize && appliedSize !== task.params.size
+                ? renderValueCard('API 返回尺寸', appliedSize)
+                : null}
+              {task.status === 'done' && currentImageSize
+                ? renderValueCard('请求尺寸', task.params.size)
+                : null}
+              {renderRequestedParamCard('质量', task.params.quality, displayQuality, appliedQuality)}
+              {renderRequestedParamCard('格式', task.params.output_format, displayOutputFormat, appliedOutputFormat)}
+              {appliedBackground && (
+                <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2">
+                  <span className="text-gray-400 dark:text-gray-500">实际背景</span>
+                  <br />
+                  <span className="text-gray-700 dark:text-gray-300 font-medium break-all">{appliedBackground}</span>
+                </div>
+              )}
+              {appliedAction && (
+                <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2">
+                  <span className="text-gray-400 dark:text-gray-500">实际动作</span>
+                  <br />
+                  <span className="text-gray-700 dark:text-gray-300 font-medium break-all">{appliedAction}</span>
+                </div>
+              )}
               <div className="bg-gray-50 dark:bg-white/[0.03] rounded-lg px-3 py-2">
                 <span className="text-gray-400 dark:text-gray-500">审核</span>
                 <br />

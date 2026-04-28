@@ -6,6 +6,8 @@ export interface DevProxyConfig {
   secure: boolean
 }
 
+export const DEV_PROXY_REQUEST_ID_HEADER = 'x-dev-proxy-request-id'
+
 function trimTrailingSlashes(value: string): string {
   return value.replace(/\/+$/, '')
 }

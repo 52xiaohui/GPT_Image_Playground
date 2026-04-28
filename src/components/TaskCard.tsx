@@ -1,5 +1,9 @@
 import { memo, useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react'
-import type { TaskRecord } from '../types'
+import {
+  resolveTaskAppliedImageParam,
+  resolveTaskDisplayImageParam,
+  type TaskRecord,
+} from '../types'
 import { getCachedImage, ensureImageCached } from '../store'
 import { formatImageRatio } from '../lib/size'
 
@@ -123,6 +127,23 @@ function TaskCard({
     const ss = String(seconds % 60).padStart(2, '0')
     return `${mm}:${ss}`
   })()
+  const displayQuality = resolveTaskDisplayImageParam(task, 'quality')
+  const displayOutputFormat = resolveTaskDisplayImageParam(task, 'output_format')
+  const appliedQuality = resolveTaskAppliedImageParam(task, 'quality')
+  const appliedSize = resolveTaskAppliedImageParam(task, 'size')
+  const appliedOutputFormat = resolveTaskAppliedImageParam(task, 'output_format')
+  const sizeChipValue = coverSize || task.params.size
+  const sizeTitleParts: string[] = []
+  if (coverSize) {
+    sizeTitleParts.push(`输出像素: ${coverSize}`)
+  }
+  if (task.params.size !== sizeChipValue || !coverSize) {
+    sizeTitleParts.push(`请求: ${task.params.size}`)
+  }
+  if (appliedSize && appliedSize !== sizeChipValue && appliedSize !== task.params.size) {
+    sizeTitleParts.push(`API 返回: ${appliedSize}`)
+  }
+  const sizeTitle = sizeTitleParts.length > 0 ? sizeTitleParts.join(' / ') : undefined
 
   return (
     <div
@@ -307,14 +328,23 @@ function TaskCard({
               >
                 {providerName}
               </span>
-              <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100 dark:bg-white/[0.04] text-gray-500 dark:text-gray-400 flex-shrink-0">
-                {task.params.quality}
+              <span
+                className="text-xs px-1.5 py-0.5 rounded bg-gray-100 dark:bg-white/[0.04] text-gray-500 dark:text-gray-400 flex-shrink-0"
+                title={appliedQuality && appliedQuality !== task.params.quality ? `请求: ${task.params.quality} / 实际: ${displayQuality}` : undefined}
+              >
+                {displayQuality}
               </span>
-              <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100 dark:bg-white/[0.04] text-gray-500 dark:text-gray-400 flex-shrink-0">
-                {task.params.size}
+              <span
+                className="text-xs px-1.5 py-0.5 rounded bg-gray-100 dark:bg-white/[0.04] text-gray-500 dark:text-gray-400 flex-shrink-0"
+                title={sizeTitle}
+              >
+                {sizeChipValue}
               </span>
-              <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100 dark:bg-white/[0.04] text-gray-500 dark:text-gray-400 flex-shrink-0">
-                {task.params.output_format}
+              <span
+                className="text-xs px-1.5 py-0.5 rounded bg-gray-100 dark:bg-white/[0.04] text-gray-500 dark:text-gray-400 flex-shrink-0"
+                title={appliedOutputFormat && appliedOutputFormat !== task.params.output_format ? `请求: ${task.params.output_format} / 实际: ${displayOutputFormat}` : undefined}
+              >
+                {displayOutputFormat}
               </span>
             </div>
             {/* 操作按钮 */}

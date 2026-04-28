@@ -2,7 +2,13 @@ import { useEffect } from 'react'
 import { initStore, startRecycleBinJanitor } from './store'
 import { useStore } from './store'
 import { normalizeBaseUrl } from './lib/api'
-import type { ApiProtocol, RequestMode, ResponsesImageInputMode, ResponsesTransportMode } from './types'
+import type {
+  ApiProtocol,
+  RequestMode,
+  ResponsesImageInputMode,
+  ResponsesPromptRevisionMode,
+  ResponsesTransportMode,
+} from './types'
 import Header from './components/Header'
 import SearchBar from './components/SearchBar'
 import TaskGrid from './components/TaskGrid'
@@ -27,6 +33,14 @@ export default function App() {
       value === 'auto' || value === 'stream' || value === 'json'
     const isResponsesImageInputMode = (value: string): value is ResponsesImageInputMode =>
       value === 'auto' || value === 'file_id'
+    const isResponsesPromptRevisionMode = (value: string): value is ResponsesPromptRevisionMode =>
+      value === 'allow' || value === 'compat'
+    const parseBooleanQueryValue = (value: string): boolean | null => {
+      const normalized = value.trim().toLowerCase()
+      if (['1', 'true', 'yes', 'on'].includes(normalized)) return true
+      if (['0', 'false', 'no', 'off'].includes(normalized)) return false
+      return null
+    }
 
     const searchParams = new URLSearchParams(window.location.search)
     const nextSettings: {
@@ -36,6 +50,7 @@ export default function App() {
       requestMode?: RequestMode
       responsesTransport?: ResponsesTransportMode
       responsesImageInputMode?: ResponsesImageInputMode
+      responsesPromptRevisionMode?: ResponsesPromptRevisionMode
     } = {}
 
     const apiUrlParam = searchParams.get('apiUrl')
@@ -71,6 +86,24 @@ export default function App() {
       nextSettings.responsesImageInputMode = responsesImageInputModeParam.trim()
     }
 
+    const responsesPromptRevisionModeParam = searchParams.get('responsesPromptRevisionMode')
+    if (
+      responsesPromptRevisionModeParam !== null &&
+      isResponsesPromptRevisionMode(responsesPromptRevisionModeParam.trim())
+    ) {
+      nextSettings.responsesPromptRevisionMode = responsesPromptRevisionModeParam.trim()
+    } else if (responsesPromptRevisionModeParam?.trim() === 'forbid') {
+      nextSettings.responsesPromptRevisionMode = 'compat'
+    }
+
+    const allowResponsesPromptRevisionParam = searchParams.get('allowResponsesPromptRevision')
+    if (allowResponsesPromptRevisionParam !== null && nextSettings.responsesPromptRevisionMode == null) {
+      const parsed = parseBooleanQueryValue(allowResponsesPromptRevisionParam)
+      if (parsed != null) {
+        nextSettings.responsesPromptRevisionMode = parsed ? 'allow' : 'compat'
+      }
+    }
+
     if (Object.keys(nextSettings).length > 0) {
       setSettings(nextSettings)
 
@@ -80,6 +113,8 @@ export default function App() {
       searchParams.delete('requestMode')
       searchParams.delete('responsesTransport')
       searchParams.delete('responsesImageInputMode')
+      searchParams.delete('responsesPromptRevisionMode')
+      searchParams.delete('allowResponsesPromptRevision')
 
       const nextSearch = searchParams.toString()
       const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash}`

@@ -6,7 +6,11 @@ import { Readable } from 'stream'
 import { pipeline } from 'stream/promises'
 import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
-import { normalizeDevProxyConfig, normalizeProxyTargetBaseUrl } from './src/lib/devProxy'
+import {
+  DEV_PROXY_REQUEST_ID_HEADER,
+  normalizeDevProxyConfig,
+  normalizeProxyTargetBaseUrl,
+} from './src/lib/devProxy'
 
 const pkg = JSON.parse(readFileSync('./package.json', 'utf-8'))
 const DEV_PROXY_TARGET_HEADER = 'x-dev-proxy-target'
@@ -195,6 +199,10 @@ async function writeProxyLog(kind: 'success' | 'error', payload: unknown): Promi
   await appendJsonLine(kind === 'success' ? SUCCESS_LOG_FILE : ERROR_LOG_FILE, payload)
 }
 
+function writeDevProxyRequestIdHeader(res: ServerResponse, requestId: string): void {
+  res.setHeader(DEV_PROXY_REQUEST_ID_HEADER, requestId)
+}
+
 function loadDevProxyConfig() {
   try {
     return normalizeDevProxyConfig(
@@ -277,9 +285,10 @@ function buildUpstreamHeaders(req: IncomingMessage, targetUrl: URL, changeOrigin
   return headers
 }
 
-function writeProxyResponseHeaders(res: ServerResponse, upstream: Response): void {
+function writeProxyResponseHeaders(res: ServerResponse, upstream: Response, requestId: string): void {
   res.statusCode = upstream.status
   res.statusMessage = upstream.statusText
+  writeDevProxyRequestIdHeader(res, requestId)
 
   upstream.headers.forEach((value, name) => {
     if (RESPONSE_HEADERS_TO_SKIP.has(name.toLowerCase())) return
@@ -287,8 +296,8 @@ function writeProxyResponseHeaders(res: ServerResponse, upstream: Response): voi
   })
 }
 
-function writeProxyResponse(res: ServerResponse, upstream: Response, body: Buffer): void {
-  writeProxyResponseHeaders(res, upstream)
+function writeProxyResponse(res: ServerResponse, upstream: Response, body: Buffer, requestId: string): void {
+  writeProxyResponseHeaders(res, upstream, requestId)
 
   res.end(body)
 }
@@ -301,16 +310,16 @@ async function readWebStreamToBuffer(stream: any): Promise<Buffer> {
   return Buffer.from(await new Response(stream).arrayBuffer())
 }
 
-async function writeProxyStreamResponse(res: ServerResponse, upstream: Response): Promise<Buffer> {
+async function writeProxyStreamResponse(res: ServerResponse, upstream: Response, requestId: string): Promise<Buffer> {
   const body = upstream.body
   if (!body) {
-    writeProxyResponseHeaders(res, upstream)
+    writeProxyResponseHeaders(res, upstream, requestId)
     res.end()
     return Buffer.alloc(0)
   }
 
   const [clientStream, logStream] = body.tee()
-  writeProxyResponseHeaders(res, upstream)
+  writeProxyResponseHeaders(res, upstream, requestId)
   res.flushHeaders()
   const logBufferPromise = readWebStreamToBuffer(logStream)
   await pipeline(Readable.fromWeb(clientStream as any), res)
@@ -336,6 +345,7 @@ async function proxyDevRequest(
   if (!targetBaseUrl) {
     res.statusCode = 502
     res.setHeader('Content-Type', 'text/plain; charset=utf-8')
+    writeDevProxyRequestIdHeader(res, requestId)
     res.end('本地代理未配置有效的目标地址')
     return
   }
@@ -356,7 +366,7 @@ async function proxyDevRequest(
     })
     const shouldStreamResponse = isEventStreamResponse(upstream) && upstream.body !== null
     const responseBody = shouldStreamResponse
-      ? await writeProxyStreamResponse(res, upstream)
+      ? await writeProxyStreamResponse(res, upstream, requestId)
       : Buffer.from(await upstream.arrayBuffer())
     const logEntry = {
       requestId,
@@ -377,7 +387,7 @@ async function proxyDevRequest(
       },
     }
     if (!shouldStreamResponse) {
-      writeProxyResponse(res, upstream, responseBody)
+      writeProxyResponse(res, upstream, responseBody, requestId)
     }
     void writeProxyLog(upstream.ok ? 'success' : 'error', logEntry).catch((error) => {
       console.error('[dev-proxy] 写入日志失败:', error)
@@ -405,6 +415,7 @@ async function proxyDevRequest(
     if (!res.headersSent) {
       res.statusCode = 502
       res.setHeader('Content-Type', 'text/plain; charset=utf-8')
+      writeDevProxyRequestIdHeader(res, requestId)
       res.end(`本地代理转发失败：${error instanceof Error ? error.message : String(error)}`)
       return
     }
