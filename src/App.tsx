@@ -63,36 +63,36 @@ export default function App() {
       nextSettings.apiKey = apiKeyParam.trim()
     }
 
-    const apiProtocolParam = searchParams.get('apiProtocol')
-    if (apiProtocolParam !== null && isApiProtocol(apiProtocolParam.trim())) {
-      nextSettings.apiProtocol = apiProtocolParam.trim()
+    const apiProtocolParam = searchParams.get('apiProtocol')?.trim()
+    if (apiProtocolParam != null && isApiProtocol(apiProtocolParam)) {
+      nextSettings.apiProtocol = apiProtocolParam
     }
 
-    const requestModeParam = searchParams.get('requestMode')
-    if (requestModeParam !== null && isRequestMode(requestModeParam.trim())) {
-      nextSettings.requestMode = requestModeParam.trim()
+    const requestModeParam = searchParams.get('requestMode')?.trim()
+    if (requestModeParam != null && isRequestMode(requestModeParam)) {
+      nextSettings.requestMode = requestModeParam
     }
 
-    const responsesTransportParam = searchParams.get('responsesTransport')
-    if (responsesTransportParam !== null && isResponsesTransportMode(responsesTransportParam.trim())) {
-      nextSettings.responsesTransport = responsesTransportParam.trim()
+    const responsesTransportParam = searchParams.get('responsesTransport')?.trim()
+    if (responsesTransportParam != null && isResponsesTransportMode(responsesTransportParam)) {
+      nextSettings.responsesTransport = responsesTransportParam
     }
 
-    const responsesImageInputModeParam = searchParams.get('responsesImageInputMode')
+    const responsesImageInputModeParam = searchParams.get('responsesImageInputMode')?.trim()
     if (
-      responsesImageInputModeParam !== null &&
-      isResponsesImageInputMode(responsesImageInputModeParam.trim())
+      responsesImageInputModeParam != null &&
+      isResponsesImageInputMode(responsesImageInputModeParam)
     ) {
-      nextSettings.responsesImageInputMode = responsesImageInputModeParam.trim()
+      nextSettings.responsesImageInputMode = responsesImageInputModeParam
     }
 
-    const responsesPromptRevisionModeParam = searchParams.get('responsesPromptRevisionMode')
+    const responsesPromptRevisionModeParam = searchParams.get('responsesPromptRevisionMode')?.trim()
     if (
-      responsesPromptRevisionModeParam !== null &&
-      isResponsesPromptRevisionMode(responsesPromptRevisionModeParam.trim())
+      responsesPromptRevisionModeParam != null &&
+      isResponsesPromptRevisionMode(responsesPromptRevisionModeParam)
     ) {
-      nextSettings.responsesPromptRevisionMode = responsesPromptRevisionModeParam.trim()
-    } else if (responsesPromptRevisionModeParam?.trim() === 'forbid') {
+      nextSettings.responsesPromptRevisionMode = responsesPromptRevisionModeParam
+    } else if (responsesPromptRevisionModeParam === 'forbid') {
       nextSettings.responsesPromptRevisionMode = 'compat'
     }
 

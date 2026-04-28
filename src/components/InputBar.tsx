@@ -716,7 +716,7 @@ export default function InputBar() {
           {promptCollapsed && (
             <button
               type="button"
-              onClick={expandPromptInput}
+              onClick={() => expandPromptInput()}
               className="mt-2 block w-full rounded-2xl border border-dashed border-gray-200/80 bg-white/40 px-4 py-3 text-left text-sm text-gray-500 transition hover:bg-white/70 hover:text-gray-700 dark:border-white/[0.08] dark:bg-white/[0.02] dark:text-gray-400 dark:hover:bg-white/[0.04] dark:hover:text-gray-200"
               title="展开提示词输入区"
             >
