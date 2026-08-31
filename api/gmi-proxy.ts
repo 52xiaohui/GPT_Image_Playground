@@ -1,9 +1,10 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node'
-import { readFileSync, writeFileSync, mkdirSync } from 'fs'
+import { readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
+import { timingSafeEqual as _timingSafeEqual } from 'crypto'
 import { createClient, type VercelKV } from '@vercel/kv'
 
-// 计费参数（每 1M token 单价，美元）——与 GMI 公布价一致，可按需加价
+// 计费参数（每 1M token 单价，美元）——与 GMI 公布价一致，用于内部成本核算
 const PRICES = {
   text_input: 5.0,
   cached_text_input: 1.25,
@@ -11,6 +12,9 @@ const PRICES = {
   cached_image_input: 2.0,
   image_output: 30.0,
 } as const
+
+// 用户侧计价：0.2 元人民币/张
+const PRICE_PER_IMAGE_CNY = 0.2
 
 const GMI_BASE = 'https://console.gmicloud.ai/api/v1/ie/requestqueue/apikey/requests/v1'
 const STATS_FILE = join('/tmp', 'gmi-stats.json')
@@ -40,6 +44,19 @@ function getGmiKey() {
 
 function getAdminToken() {
   return process.env.ADMIN_TOKEN ?? ''
+}
+
+// 密码校验：timingSafeEqual 防时序攻击
+function verifyPassword(expected: string | undefined, password: string): boolean {
+  if (!expected) return false
+  const a = Buffer.from(password, 'utf8')
+  const b = Buffer.from(expected, 'utf8')
+  if (a.length !== b.length) {
+    // 长度不同也做一次比较，保持耗时相似
+    _timingSafeEqual(a, a)
+    return false
+  }
+  return _timingSafeEqual(a, b)
 }
 
 // 配置了 KV 环境变量时用 Vercel KV（持久），否则降级到 /tmp 文件（实例生命周期内有效）
@@ -79,7 +96,6 @@ async function saveStats(stats: StatsMap) {
     }
   }
   try {
-    mkdirSync('/tmp', { recursive: true })
     writeFileSync(STATS_FILE, JSON.stringify(stats))
   } catch (err) {
     console.warn('stats write failed', err)
@@ -88,26 +104,45 @@ async function saveStats(stats: StatsMap) {
 
 function getUsageCost(body: unknown): { images: number; cost: number } | null {
   if (!body || typeof body !== 'object') return null
+  // 计费只认"确定性成功"：data 数组里每张图必须有 b64_json 或可访问的 url
+  const data = Array.isArray((body as Record<string, unknown>).data)
+    ? (body as Record<string, unknown>).data as unknown[]
+    : []
+  let images = 0
+  for (const item of data) {
+    if (!item || typeof item !== 'object') continue
+    const record = item as Record<string, unknown>
+    if (typeof record.b64_json === 'string' && record.b64_json.length > 0) images += 1
+    else if (typeof record.url === 'string' && record.url.startsWith('http')) images += 1
+  }
+  if (data.length === 0) return null // 无 data → 不计费
+  if (images === 0) return null // 有 data 但没有一张有效图 → 不计
+
+  // 成本按 token 精确核算（供内部对账；用户侧按张计价）
+  let cost = 0
   const usage = (body as Record<string, unknown>).usage
-  if (!usage || typeof usage !== 'object') return null
-  const u = usage as Record<string, unknown>
-  const details = (u.input_tokens_details ?? {}) as Record<string, number>
-  const outDetails = (u.output_tokens_details ?? {}) as Record<string, number>
-  const textIn = (details.text_tokens ?? 0) - (details.cached_text_tokens ?? details.text_tokens_cached ?? 0)
-  const imgIn = (details.image_tokens ?? 0) - (details.cached_image_tokens ?? details.image_tokens_cached ?? 0)
-  const cost =
-    (textIn * PRICES.text_input + (details.cached_text_tokens ?? 0) * PRICES.cached_text_input
-      + imgIn * PRICES.image_input + (details.cached_image_tokens ?? 0) * PRICES.cached_image_input
-      + (outDetails.image_tokens ?? 0) * PRICES.image_output) / 1_000_000
-  // data 数组条目数即图片张数；无 data 时按 0 计
-  const data = Array.isArray((body as Record<string, unknown>).data) ? (body as Record<string, unknown>).data as unknown[] : []
-  return { images: data.length, cost }
+  if (usage && typeof usage === 'object') {
+    const u = usage as Record<string, unknown>
+    const details = (u.input_tokens_details ?? {}) as Record<string, number>
+    const outDetails = (u.output_tokens_details ?? {}) as Record<string, number>
+    const textIn = Math.max(0, (details.text_tokens ?? 0) - (details.cached_text_tokens ?? details.text_tokens_cached ?? 0))
+    const imgIn = Math.max(0, (details.image_tokens ?? 0) - (details.cached_image_tokens ?? details.image_tokens_cached ?? 0))
+    cost =
+      (textIn * PRICES.text_input + (details.cached_text_tokens ?? 0) * PRICES.cached_text_input
+        + imgIn * PRICES.image_input + (details.cached_image_tokens ?? 0) * PRICES.cached_image_input
+        + (outDetails.image_tokens ?? 0) * PRICES.image_output) / 1_000_000
+  }
+  return { images, cost }
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  // CORS 预检
+  // CORS 预检：只允许同源（前端与函数同域名部署），防止第三方站点借用计费代理
   if (req.method === 'OPTIONS') {
-    res.setHeader('Access-Control-Allow-Origin', '*')
+    const origin = req.headers.origin ?? ''
+    if (process.env.VERCEL_URL && origin.endsWith(`https://${process.env.VERCEL_URL}`)) {
+      res.setHeader('Access-Control-Allow-Origin', origin)
+      res.setHeader('Vary', 'Origin')
+    }
     res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS')
     res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type')
     return res.status(204).end()
@@ -125,14 +160,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const username = sepIdx > 0 ? token.slice(0, sepIdx) : token
       const password = sepIdx > 0 ? token.slice(sepIdx + 1) : ''
       const expected = getUsers().get(username)
-      if (!expected || expected !== password) {
+      if (!verifyPassword(expected, password)) {
         return res.status(401).json({ error: '用户名或密码错误' })
       }
       const stats = await loadStats()
       const entry = stats[username] ?? { images: 0, cost: 0, requests: 0 }
-      return res.status(200).json({ user: username, images: entry.images, requests: entry.requests, cost: Number(entry.cost.toFixed(4)) })
+      return res.status(200).json({
+        user: username,
+        images: entry.images,
+        requests: entry.requests,
+        pricePerImage: PRICE_PER_IMAGE_CNY,
+        amount: Number((entry.images * PRICE_PER_IMAGE_CNY).toFixed(2)),
+        cost: Number(entry.cost.toFixed(4)),
+      })
     }
-    if (!getAdminToken() || auth !== `Bearer ${getAdminToken()}`) {
+    if (!getAdminToken() || !verifyPassword(getAdminToken(), auth.replace(/^Bearer\s+/i, ''))) {
       res.setHeader('WWW-Authenticate', 'Bearer realm="stats"')
       return res.status(401).json({ error: '需要 ADMIN_TOKEN 查询用量' })
     }
@@ -160,7 +202,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   const expected = users.get(username)
-  if (!expected || expected !== password) {
+  if (!verifyPassword(expected, password)) {
     const entry = failCounts.get(username) ?? { count: 0, until: 0 }
     entry.count += 1
     if (entry.count >= 5) {
@@ -206,6 +248,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // background: auto → 删除走 GMI 默认
     if (inner.background === 'auto') delete inner.background
     if (inner.moderation === 'auto') delete inner.moderation
+    // 只允许转发到生图/生图编辑两个端点，防止被当作任意转发器
+    if (gmiRelPath !== 'images/generations' && gmiRelPath !== 'images/edits') {
+      return res.status(404).json({ error: '不支持的接口路径' })
+    }
   }
 
   let upstream: Response
@@ -227,12 +273,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.status(upstream.status)
   res.setHeader('Content-Type', upstream.headers.get('content-type') ?? 'application/json')
 
-  // 成功的生图响应才计数；失败不阻塞响应返回
+  // 只统计确定性成功的生图：data 里每张必须有 b64_json 或 url；无图不计费
   if (upstream.ok) {
     try {
       const body = JSON.parse(text)
       const usage = getUsageCost(body)
-      if (usage) {
+      if (usage && usage.images > 0) {
         const stats = await loadStats()
         const entry = stats[username] ?? { images: 0, cost: 0, requests: 0 }
         entry.images += usage.images

@@ -24,6 +24,8 @@ interface UsageInfo {
   user?: string
   images?: number
   requests?: number
+  pricePerImage?: number
+  amount?: number
   cost?: number
   error?: string
 }
@@ -310,11 +312,11 @@ export default function Header() {
           {usage && (
             <div
               className="hidden sm:block px-3 py-1.5 rounded-lg text-xs text-gray-500 dark:text-gray-400 tabular-nums mr-2"
-              title="当前账号已生成的图片用量（按 token 计费）"
+              title={`按张计费，每张 ${usage.pricePerImage ?? 0.2} 元`}
             >
               已生成 <span className="font-semibold text-gray-700 dark:text-gray-300">{usage.images}</span> 张
-              {typeof usage.cost === 'number' && usage.cost > 0 && (
-                <span> · ≈${usage.cost.toFixed(2)}</span>
+              {typeof usage.amount === 'number' && usage.amount > 0 && (
+                <span> · ¥{usage.amount.toFixed(2)}</span>
               )}
             </div>
           )}
