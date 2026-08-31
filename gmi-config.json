@@ -54,7 +54,7 @@
       "id": "preset-gmi",
       "name": "GMI gpt-image-2",
       "provider": "gmi",
-      "baseUrl": "https://你的后端域名/api/gmi-proxy/v1/",
+      "baseUrl": "https://gpt-image-playground-ten-green.vercel.app/api/gmi-proxy/v1/",
       "model": "gpt-image-2",
       "apiMode": "images",
       "isDefault": true
