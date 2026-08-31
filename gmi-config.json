@@ -1,0 +1,63 @@
+{
+  "customProviders": [
+    {
+      "id": "gmi",
+      "name": "GMI（gpt-image-2）",
+      "submit": {
+        "path": "images/generations",
+        "method": "POST",
+        "contentType": "json",
+        "body": {
+          "model": "$profile.model",
+          "prompt": "$prompt",
+          "size": "$params.size",
+          "quality": "$params.quality",
+          "output_format": "$params.output_format",
+          "moderation": "$params.moderation",
+          "output_compression": "$params.output_compression",
+          "n": "$params.n",
+          "background": "$params.background"
+        },
+        "result": {
+          "imageUrlPaths": ["data.*.url"],
+          "b64JsonPaths": ["data.*.b64_json"]
+        }
+      },
+      "editSubmit": {
+        "path": "images/edits",
+        "method": "POST",
+        "contentType": "multipart",
+        "body": {
+          "model": "$profile.model",
+          "prompt": "$prompt",
+          "size": "$params.size",
+          "quality": "$params.quality",
+          "output_format": "$params.output_format",
+          "moderation": "$params.moderation",
+          "output_compression": "$params.output_compression",
+          "n": "$params.n",
+          "background": "$params.background"
+        },
+        "files": [
+          { "field": "image[]", "source": "inputImages", "array": true },
+          { "field": "mask", "source": "mask" }
+        ],
+        "result": {
+          "imageUrlPaths": ["data.*.url"],
+          "b64JsonPaths": ["data.*.b64_json"]
+        }
+      }
+    }
+  ],
+  "profiles": [
+    {
+      "id": "preset-gmi",
+      "name": "GMI gpt-image-2",
+      "provider": "gmi",
+      "baseUrl": "https://你的后端域名/api/gmi-proxy/v1/",
+      "model": "gpt-image-2",
+      "apiMode": "images",
+      "isDefault": true
+    }
+  ]
+}

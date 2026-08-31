@@ -15,6 +15,7 @@
   "dependencies": {
     "@fal-ai/client": "^1.10.0",
     "@streamdown/math": "^1.0.2",
+    "@vercel/kv": "^3.0.0",
     "core-js": "^3.49.0",
     "fflate": "^0.8.3",
     "katex": "^0.16.47",
@@ -32,6 +33,7 @@
   "devDependencies": {
     "@types/react": "^19.1.2",
     "@types/react-dom": "^19.1.2",
+    "@vercel/node": "^10.0.0",
     "@vitejs/plugin-react": "^4.4.1",
     "autoprefixer": "^10.4.21",
     "jsdom": "^29.1.1",
