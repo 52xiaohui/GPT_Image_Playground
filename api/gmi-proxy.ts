@@ -248,6 +248,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // background: auto → 删除走 GMI 默认
     if (inner.background === 'auto') delete inner.background
     if (inner.moderation === 'auto') delete inner.moderation
+    // size 必须为 16 倍数的 WxH；否则规整到 16 倍数（保持宽高比尽量接近），上限 4096
+    if (typeof inner.size === 'string' && /^\d+x\d+$/.test(inner.size)) {
+      const [wRaw, hRaw] = inner.size.split('x').map(Number)
+      const snap = (v: number) => Math.min(3840, Math.max(16, Math.round(v / 16) * 16))
+      const snapped = `${snap(wRaw)}x${snap(hRaw)}`
+      if (snapped !== inner.size) inner.size = snapped
+    } else if (typeof inner.size !== 'string' || !/^\d+x\d+$/.test(String(inner.size))) {
+      delete inner.size
+    }
     // 只允许转发到生图/生图编辑两个端点，防止被当作任意转发器
     if (gmiRelPath !== 'images/generations' && gmiRelPath !== 'images/edits') {
       return res.status(404).json({ error: '不支持的接口路径' })

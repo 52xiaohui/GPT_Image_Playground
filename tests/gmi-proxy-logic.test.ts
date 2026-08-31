@@ -193,13 +193,24 @@ describe('gmi-proxy auto 参数兜底', () => {
     expect(sentBody.prompt).toBe('fox')
   })
 
-  it('明确的 WxH size 与 quality 保留不动', async () => {
+  it('明确的 quality 保留 + size 规整到 16 倍数', async () => {
     const req = { method: 'POST', headers: { authorization: 'Bearer alice:pass1' }, query: { path: 'images/generations' }, body: { model: 'gpt-image-2', prompt: 'cat', size: '1920x1080', quality: 'high' } } as unknown as import('@vercel/node').VercelRequest
     const res = makeRes()
     await handler(req, res as never)
     expect(res.statusCode).toBe(200)
     const sentBody = JSON.parse(String(upstreamCalls[0].init.body))
-    expect(sentBody.size).toBe('1920x1080')
+    expect(sentBody.size).toBe('1920x1088')
     expect(sentBody.quality).toBe('high')
+  })
+})
+
+describe('gmi-proxy size 规整', () => {
+  it('非 16 倍数的 size 被规整（1920x1080 → 1920x1088）', async () => {
+    const req = { method: 'POST', headers: { authorization: 'Bearer alice:pass1' }, query: { path: 'images/generations' }, body: { model: 'gpt-image-2', prompt: 'x', size: '1920x1080' } } as unknown as import('@vercel/node').VercelRequest
+    const res = makeRes()
+    await handler(req, res as never)
+    expect(res.statusCode).toBe(200)
+    const sentBody = JSON.parse(String(upstreamCalls[0].init.body))
+    expect(sentBody.size).toBe('1920x1088')
   })
 })
