@@ -229,15 +229,32 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // GMI_BASE 已含 /v1，前端 baseUrl 按 OpenAI 惯例带 /v1/ —— 剥掉重复的版本前缀
   const gmiRelPath = gmiPath.startsWith('v1/') ? gmiPath.slice(3) : gmiPath
   const target = `${GMI_BASE}/${gmiRelPath}`
+  const isEdits = gmiRelPath === 'images/edits'
+  // multipart（图生图）：透传原始 body 与 Content-Type（含 boundary），不解析 JSON
+  const upstreamContentType = req.headers['content-type'] ?? ''
+  const isMultipart = upstreamContentType.startsWith('multipart/')
   let payload: unknown
-  try {
-    payload = typeof req.body === 'string' ? JSON.parse(req.body) : req.body
-  } catch {
-    return res.status(400).json({ error: '请求体必须是 JSON' })
+  let upstreamBody: BodyInit
+  if (isMultipart) {
+    payload = { multipart: true }
+    upstreamBody = await new Promise<Buffer>((resolve, reject) => {
+      const chunks: Buffer[] = []
+      req.on('data', (chunk: Buffer) => chunks.push(chunk as Buffer))
+      req.on('end', () => resolve(Buffer.concat(chunks)))
+      req.on('error', reject)
+    })
+    void payload
+  } else {
+    try {
+      payload = typeof req.body === 'string' ? JSON.parse(req.body) : req.body
+    } catch {
+      return res.status(400).json({ error: '请求体必须是 JSON' })
+    }
+    upstreamBody = JSON.stringify(payload)
   }
 
   // GMI 的 gpt-image-2 不支持 size/quality = "auto"，做一层兜底：去掉或换成具体值
-  if (payload && typeof payload === 'object') {
+  if (!isMultipart && payload && typeof payload === 'object') {
     const record = payload as Record<string, unknown>
     // 请求体可能是 {model, prompt, payload: {...}}（GMI 原生封装）或纯 OpenAI 格式
     const inner = (record.payload && typeof record.payload === 'object' ? record.payload : record) as Record<string, unknown>
@@ -257,10 +274,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     } else if (typeof inner.size !== 'string' || !/^\d+x\d+$/.test(String(inner.size))) {
       delete inner.size
     }
-    // 只允许转发到生图/生图编辑两个端点，防止被当作任意转发器
-    if (gmiRelPath !== 'images/generations' && gmiRelPath !== 'images/edits') {
-      return res.status(404).json({ error: '不支持的接口路径' })
-    }
+    upstreamBody = JSON.stringify(payload)
+  }
+  // 只允许转发到生图/生图编辑两个端点，防止被当作任意转发器
+  if (gmiRelPath !== 'images/generations' && gmiRelPath !== 'images/edits') {
+    return res.status(404).json({ error: '不支持的接口路径' })
   }
 
   let upstream: Response
@@ -269,9 +287,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${getGmiKey()}`,
-        'Content-Type': 'application/json',
+        'Content-Type': isMultipart ? upstreamContentType : 'application/json',
       },
-      body: JSON.stringify(payload),
+      body: upstreamBody,
     })
   } catch (err) {
     console.error('GMI upstream error', err)
