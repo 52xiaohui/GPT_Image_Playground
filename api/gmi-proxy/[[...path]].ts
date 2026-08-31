@@ -157,7 +157,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   failCounts.delete(username)
 
   // —— 转发到 GMI ——
-  const gmiPath = String(req.query.path ?? '').replace(/^\/+/, '')
+  // catch-all 路由下 Vercel 把路径段放进 req.query.path（字符串或数组）
+  const rawPath = Array.isArray(req.query.path) ? req.query.path.join('/') : String(req.query.path ?? '')
+  const gmiPath = rawPath.replace(/^\/+/, '')
   const target = `${GMI_BASE}/${gmiPath}`
   let payload: unknown
   try {
