@@ -10,7 +10,7 @@ process.env.ADMIN_TOKEN = 'admin-token'
 delete process.env.KV_REST_API_URL
 delete process.env.KV_REST_API_TOKEN
 
-import handler from './gmi-proxy/[[...path]]'
+import handler from '../api/gmi-proxy'
 
 type ReqLike = { method: string; headers: Record<string, string>; query: Record<string, string>; body?: unknown }
 function makeRes() {

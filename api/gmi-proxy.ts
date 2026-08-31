@@ -157,10 +157,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   failCounts.delete(username)
 
   // —— 转发到 GMI ——
-  // catch-all 路由下 Vercel 把路径段放进 req.query.path（字符串或数组）
-  const rawPath = Array.isArray(req.query.path) ? req.query.path.join('/') : String(req.query.path ?? '')
-  const gmiPath = rawPath.replace(/^\/+/, '')
-  const target = `${GMI_BASE}/${gmiPath}`
+  // 优先从 URL 提取 /api/gmi-proxy/ 后面的真实子路径（不依赖 rewrite 的 query 传参）
+  const rawUrl = req.url ?? ''
+  const marker = '/api/gmi-proxy/'
+  const markerIdx = rawUrl.indexOf(marker)
+  const subPath = markerIdx >= 0 ? rawUrl.slice(markerIdx + marker.length).split('?')[0] : ''
+  // 兜底：rewrite 传入的 ?gmiPath= 或 ?path=（字符串或数组）
+  const readQueryPath = (key: string) => {
+    const value = (req.query as Record<string, unknown>)[key]
+    return Array.isArray(value) ? value.join('/') : typeof value === 'string' ? value : ''
+  }
+  const gmiPath = (subPath || readQueryPath('gmiPath') || readQueryPath('path')).replace(/^\/+/, '')
+  // GMI_BASE 已含 /v1，前端 baseUrl 按 OpenAI 惯例带 /v1/ —— 剥掉重复的版本前缀
+  const gmiRelPath = gmiPath.startsWith('v1/') ? gmiPath.slice(3) : gmiPath
+  const target = `${GMI_BASE}/${gmiRelPath}`
   let payload: unknown
   try {
     payload = typeof req.body === 'string' ? JSON.parse(req.body) : req.body

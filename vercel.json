@@ -2,5 +2,11 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "git": {
     "deploymentEnabled": false
-  }
+  },
+  "rewrites": [
+    {
+      "source": "/api/gmi-proxy/(.*)",
+      "destination": "/api/gmi-proxy?gmiPath=$1"
+    }
+  ]
 }
