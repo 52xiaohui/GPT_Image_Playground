@@ -113,9 +113,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(204).end()
   }
 
-  // GET /api/gmi-proxy → 查询用量（需 ADMIN_TOKEN）
+  // GET /api/gmi-proxy?usage=me → 用户查询自己的用量（Bearer 用户名:密码）
+  // GET /api/gmi-proxy → 查询全部用量（需 ADMIN_TOKEN）
   if (req.method === 'GET') {
     const auth = req.headers.authorization ?? ''
+    const queryUsage = String((req.query as Record<string, unknown>).usage ?? '')
+    if (queryUsage === 'me') {
+      // 用户自查：校验自己的用户名密码后返回本人用量
+      const token = auth.replace(/^Bearer\s+/i, '')
+      const sepIdx = token.indexOf(':')
+      const username = sepIdx > 0 ? token.slice(0, sepIdx) : token
+      const password = sepIdx > 0 ? token.slice(sepIdx + 1) : ''
+      const expected = getUsers().get(username)
+      if (!expected || expected !== password) {
+        return res.status(401).json({ error: '用户名或密码错误' })
+      }
+      const stats = await loadStats()
+      const entry = stats[username] ?? { images: 0, cost: 0, requests: 0 }
+      return res.status(200).json({ user: username, images: entry.images, requests: entry.requests, cost: Number(entry.cost.toFixed(4)) })
+    }
     if (!getAdminToken() || auth !== `Bearer ${getAdminToken()}`) {
       res.setHeader('WWW-Authenticate', 'Bearer realm="stats"')
       return res.status(401).json({ error: '需要 ADMIN_TOKEN 查询用量' })
