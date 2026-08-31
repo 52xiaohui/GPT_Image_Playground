@@ -178,6 +178,20 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(400).json({ error: '请求体必须是 JSON' })
   }
 
+  // GMI 的 gpt-image-2 不支持 size/quality = "auto"，做一层兜底：去掉或换成具体值
+  if (payload && typeof payload === 'object') {
+    const record = payload as Record<string, unknown>
+    // 请求体可能是 {model, prompt, payload: {...}}（GMI 原生封装）或纯 OpenAI 格式
+    const inner = (record.payload && typeof record.payload === 'object' ? record.payload : record) as Record<string, unknown>
+    // size: auto → 删除该字段让 GMI 用默认 1024x1024
+    if (inner.size == null || inner.size === 'auto' || inner.size === '') delete inner.size
+    // quality: auto → medium（GMI 默认质量，价格可预期）
+    if (inner.quality === 'auto') inner.quality = 'medium'
+    // background: auto → 删除走 GMI 默认
+    if (inner.background === 'auto') delete inner.background
+    if (inner.moderation === 'auto') delete inner.moderation
+  }
+
   let upstream: Response
   try {
     upstream = await fetch(target, {

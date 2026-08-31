@@ -179,3 +179,27 @@ describe('gmi-proxy KV 模式', () => {
     expect(stored.bob.requests).toBe(1)
   })
 })
+describe('gmi-proxy auto 参数兜底', () => {
+  it('size=auto 被移除，quality=auto 转为 medium', async () => {
+    const req = { method: 'POST', headers: { authorization: 'Bearer alice:pass1' }, query: { path: 'images/generations' }, body: { model: 'gpt-image-2', prompt: 'fox', size: 'auto', quality: 'auto', background: 'auto', n: 1 } } as unknown as import('@vercel/node').VercelRequest
+    const res = makeRes()
+    await handler(req, res as never)
+    expect(res.statusCode).toBe(200)
+    expect(upstreamCalls).toHaveLength(1)
+    const sentBody = JSON.parse(String(upstreamCalls[0].init.body)) as Record<string, unknown>
+    expect(sentBody.size).toBeUndefined()
+    expect(sentBody.quality).toBe('medium')
+    expect(sentBody.background).toBeUndefined()
+    expect(sentBody.prompt).toBe('fox')
+  })
+
+  it('明确的 WxH size 与 quality 保留不动', async () => {
+    const req = { method: 'POST', headers: { authorization: 'Bearer alice:pass1' }, query: { path: 'images/generations' }, body: { model: 'gpt-image-2', prompt: 'cat', size: '1920x1080', quality: 'high' } } as unknown as import('@vercel/node').VercelRequest
+    const res = makeRes()
+    await handler(req, res as never)
+    expect(res.statusCode).toBe(200)
+    const sentBody = JSON.parse(String(upstreamCalls[0].init.body))
+    expect(sentBody.size).toBe('1920x1080')
+    expect(sentBody.quality).toBe('high')
+  })
+})
