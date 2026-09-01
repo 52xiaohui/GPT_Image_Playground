@@ -55,7 +55,6 @@
       "name": "GMI gpt-image-2",
       "provider": "gmi",
       "baseUrl": "https://i.outm.cn/api/gmi-proxy/v1/",
-      "apiKey": "main:main123",
       "model": "gpt-image-2",
       "apiMode": "images",
       "isDefault": true
