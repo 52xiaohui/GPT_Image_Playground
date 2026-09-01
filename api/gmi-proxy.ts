@@ -220,7 +220,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const password = sep > 0 ? auth.slice(sep + 1) : ''
   const users = getUsers()
   const now = Date.now()
-  const fail = failCounts.get(username)
+  // 限速按「用户名:密码」完整凭证记录：密码输错被锁定后，用正确密码登录不受影响
+  const credentialKey = auth
+  const fail = failCounts.get(credentialKey)
   if (fail && fail.until > now) {
     res.setHeader('Retry-After', Math.ceil((fail.until - now) / 1000))
     return res.status(429).json({ error: `失败次数过多，请 ${Math.ceil((fail.until - now) / 60000)} 分钟后再试` })
@@ -228,16 +230,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const expected = users.get(username)
   if (!verifyPassword(expected, password)) {
-    const entry = failCounts.get(username) ?? { count: 0, until: 0 }
+    const entry = failCounts.get(credentialKey) ?? { count: 0, until: 0 }
     entry.count += 1
     if (entry.count >= 5) {
       entry.count = 0
       entry.until = now + 10 * 60 * 1000
     }
-    failCounts.set(username, entry)
+    failCounts.set(credentialKey, entry)
     return res.status(401).json({ error: '用户名或密码错误' })
   }
-  failCounts.delete(username)
+  failCounts.delete(credentialKey)
 
   // —— 转发到 GMI ——
   // 优先从 URL 提取 /api/gmi-proxy/ 后面的真实子路径（不依赖 rewrite 的 query 传参）
