@@ -13,15 +13,26 @@ const PRICES = {
   image_output: 30.0,
 } as const
 
-// 用户侧计价：0.2 元人民币/张
+// 用户侧计价：0.2 元人民币/张；每人前 FREE_IMAGES 张免费
 const PRICE_PER_IMAGE_CNY = 0.2
+const FREE_IMAGES = 20
 
 const GMI_BASE = 'https://console.gmicloud.ai/api/v1/ie/requestqueue/apikey/requests/v1'
 const STATS_FILE = join('/tmp', 'gmi-stats.json')
 const STATS_KEY = 'gmi-stats'
 
-export interface UsageEntry { images: number; cost: number; requests: number }
+export interface UsageEntry {
+  images: number
+  cost: number
+  requests: number
+  // 每日用量：{'YYYY-MM-DD': 张数}
+  daily?: Record<string, number>
+}
 type StatsMap = Record<string, UsageEntry>
+
+function todayKey(): string {
+  return new Date().toISOString().slice(0, 10)
+}
 
 // 密码错误时连续失败限速（实例内限速；Serverless 多实例下仅尽力而为）
 const failCounts = new Map<string, { count: number; until: number }>()
@@ -164,13 +175,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         return res.status(401).json({ error: '用户名或密码错误' })
       }
       const stats = await loadStats()
-      const entry = stats[username] ?? { images: 0, cost: 0, requests: 0 }
+      const entry = stats[username] ?? { images: 0, cost: 0, requests: 0, daily: {} }
+      const today = todayKey()
+      const todayImages = entry.daily?.[today] ?? 0
+      const billable = Math.max(0, entry.images - FREE_IMAGES)
+      const todayBillable = Math.max(0, todayImages - 0) // 每日展示为当天总张数；免费额度按总量算
       return res.status(200).json({
         user: username,
         images: entry.images,
         requests: entry.requests,
+        todayImages,
+        freeQuota: FREE_IMAGES,
+        remaining: Math.max(0, FREE_IMAGES - entry.images),
         pricePerImage: PRICE_PER_IMAGE_CNY,
-        amount: Number((entry.images * PRICE_PER_IMAGE_CNY).toFixed(2)),
+        billableImages: billable,
+        amount: Number((billable * PRICE_PER_IMAGE_CNY).toFixed(2)),
         cost: Number(entry.cost.toFixed(4)),
       })
     }
@@ -179,11 +198,17 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       return res.status(401).json({ error: '需要 ADMIN_TOKEN 查询用量' })
     }
     const stats = await loadStats()
+    const today = todayKey()
     const withTotal = Object.fromEntries(
-      Object.entries(stats).map(([user, v]) => [user, { ...v, cost: Number(v.cost.toFixed(4)) }]),
+      Object.entries(stats).map(([user, v]) => [user, {
+        ...v,
+        todayImages: v.daily?.[today] ?? 0,
+        amount: Number((Math.max(0, v.images - FREE_IMAGES) * PRICE_PER_IMAGE_CNY).toFixed(2)),
+        cost: Number(v.cost.toFixed(4)),
+      }]),
     )
     const total = Object.values(stats).reduce((acc, v) => ({ images: acc.images + v.images, cost: acc.cost + v.cost, requests: acc.requests + v.requests }), { images: 0, cost: 0, requests: 0 })
-    return res.status(200).json({ total: { ...total, cost: Number(total.cost.toFixed(4)) }, users: withTotal })
+    return res.status(200).json({ freeQuota: FREE_IMAGES, total: { ...total, cost: Number(total.cost.toFixed(4)) }, users: withTotal })
   }
 
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
@@ -307,10 +332,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       const usage = getUsageCost(body)
       if (usage && usage.images > 0) {
         const stats = await loadStats()
-        const entry = stats[username] ?? { images: 0, cost: 0, requests: 0 }
+        const entry = stats[username] ?? { images: 0, cost: 0, requests: 0, daily: {} }
         entry.images += usage.images
         entry.cost += usage.cost
         entry.requests += 1
+        // 每日用量记录（保留最近 30 天，防止无限增长）
+        const day = todayKey()
+        const daily = entry.daily ?? {}
+        daily[day] = (daily[day] ?? 0) + usage.images
+        const cutoff = new Date(Date.now() - 30 * 86400_000).toISOString().slice(0, 10)
+        for (const key of Object.keys(daily)) {
+          if (key < cutoff) delete daily[key]
+        }
+        entry.daily = daily
         stats[username] = entry
         await saveStats(stats)
       }

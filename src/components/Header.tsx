@@ -24,7 +24,11 @@ interface UsageInfo {
   user?: string
   images?: number
   requests?: number
+  todayImages?: number
+  freeQuota?: number
+  remaining?: number
   pricePerImage?: number
+  billableImages?: number
   amount?: number
   cost?: number
   error?: string
@@ -312,11 +316,17 @@ export default function Header() {
           {usage && (
             <div
               className="hidden sm:block px-3 py-1.5 rounded-lg text-xs text-gray-500 dark:text-gray-400 tabular-nums mr-2"
-              title={`按张计费，每张 ${usage.pricePerImage ?? 0.2} 元`}
+              title={`今日已生成 ${usage.todayImages ?? 0} 张；累计 ${usage.images ?? 0} 张${(usage.remaining ?? 0) > 0 ? `，免费额度剩 ${usage.remaining} 张` : '，免费额度已用完，超出部分每张 0.2 元'}`}
             >
-              已生成 <span className="font-semibold text-gray-700 dark:text-gray-300">{usage.images}</span> 张
-              {typeof usage.amount === 'number' && usage.amount > 0 && (
-                <span> · ¥{usage.amount.toFixed(2)}</span>
+              今日 <span className="font-semibold text-gray-700 dark:text-gray-300">{usage.todayImages ?? 0}</span> 张
+              <span className="mx-1.5 text-gray-300 dark:text-gray-600">|</span>
+              累计 <span className="font-semibold text-gray-700 dark:text-gray-300">{usage.images}</span> 张
+              {typeof usage.remaining === 'number' && usage.remaining > 0 ? (
+                <span> · 免费剩 {usage.remaining} 张</span>
+              ) : (
+                <> {typeof usage.amount === 'number' && usage.amount > 0 && (
+                  <span> · 已计 ¥{usage.amount.toFixed(2)}</span>
+                )}</>
               )}
             </div>
           )}
