@@ -1503,14 +1503,14 @@ export default function SettingsModal() {
 
               {/* 5. API Key */}
               <div className="block">
-                <span className="mb-1.5 block text-sm text-gray-600 dark:text-gray-300">API Key</span>
+                <span className="mb-1.5 block text-sm text-gray-600 dark:text-gray-300">访问密码</span>
                 <div className="relative">
                   <input
                     value={activeProfile.apiKey}
                     onChange={(e) => updateActiveProfile({ apiKey: e.target.value })}
                     onBlur={(e) => commitActiveProfilePatch({ apiKey: e.target.value })}
                     type={showApiKey ? 'text' : 'password'}
-                    placeholder={activeProfile.provider === 'fal' ? 'FAL_KEY' : 'sk-...'}
+                    placeholder='格式：用户名:密码（例如 zhangsan:abc123）'
                     className="w-full rounded-xl border border-gray-200/70 bg-white/60 px-3 py-2.5 pr-10 text-sm text-gray-700 outline-none transition focus:border-blue-300 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-200 dark:focus:border-blue-500/50"
                   />
                   <button
@@ -1535,7 +1535,7 @@ export default function SettingsModal() {
                   </button>
                 </div>
                 <div data-selectable-text className="mt-1.5 text-xs text-gray-500 dark:text-gray-500">
-                  支持通过查询参数覆盖：<code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">?apiKey=</code>
+                  填写管理员分配给你的访问密码（用户名:密码）
                 </div>
               </div>
 
