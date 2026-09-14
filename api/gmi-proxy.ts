@@ -60,8 +60,8 @@ function getAdminToken() {
 // 密码校验：timingSafeEqual 防时序攻击
 function verifyPassword(expected: string | undefined, password: string): boolean {
   if (!expected) return false
-  const a = Buffer.from(password, 'utf8')
-  const b = Buffer.from(expected, 'utf8')
+  const a = new Uint8Array(Buffer.from(password, 'utf8'))
+  const b = new Uint8Array(Buffer.from(expected, 'utf8'))
   if (a.length !== b.length) {
     // 长度不同也做一次比较，保持耗时相似
     _timingSafeEqual(a, a)
@@ -264,10 +264,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   let upstreamBody: BodyInit
   if (isMultipart) {
     payload = { multipart: true }
-    upstreamBody = await new Promise<Buffer>((resolve, reject) => {
-      const chunks: Buffer[] = []
-      req.on('data', (chunk: Buffer) => chunks.push(chunk as Buffer))
-      req.on('end', () => resolve(Buffer.concat(chunks)))
+    upstreamBody = await new Promise<Uint8Array<ArrayBuffer>>((resolve, reject) => {
+      const chunks: Uint8Array<ArrayBuffer>[] = []
+      req.on('data', (chunk: Buffer) => chunks.push(new Uint8Array(chunk)))
+      req.on('end', () => resolve(new Uint8Array(Buffer.concat(chunks))))
       req.on('error', reject)
     })
     void payload
