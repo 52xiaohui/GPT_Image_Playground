@@ -56,7 +56,8 @@ import { validateMaskMatchesImage } from './lib/canvasImage'
 import { orderInputImagesForMask } from './lib/mask'
 import { getChangedParams, normalizeParamsForSettings } from './lib/paramCompatibility'
 import { createTransparentOutputMeta, getTransparentRequestParams, removeKeyedBackgroundFromDataUrl } from './lib/transparentImage'
-import { blobToDataUrl, fileToDataUrl } from './lib/dataUrl'
+import { blobToDataUrl } from './lib/dataUrl'
+import { compressInputImageBlob } from './lib/inputImageCompress'
 import { cacheImage, cacheThumbnail, clearImageCaches, deleteCachedImage, deleteImageCacheEntry, ensureImageCached, scheduleThumbnailBackfill } from './lib/imageCache'
 import { hasActiveDataOperations } from './lib/dataOperations'
 import { formatExportFileTime } from './lib/exportFileName'
@@ -4557,7 +4558,9 @@ export async function addImageFromFile(file: File): Promise<void> {
 
 export async function createInputImageFromFile(file: File): Promise<InputImage | null> {
   if (!file.type.startsWith('image/')) return null
-  const dataUrl = await fileToDataUrl(file)
+  const blob = await compressInputImageBlob(file, file.name)
+  if (blob !== file) useStore.getState().showToast('图片过大，已自动压缩', 'info')
+  const dataUrl = await blobToDataUrl(blob, file.type || 'image/png')
   const id = await storeImage(dataUrl, 'upload')
   cacheImage(id, dataUrl)
   return { id, dataUrl }
@@ -4566,9 +4569,11 @@ export async function createInputImageFromFile(file: File): Promise<InputImage |
 /** 添加图片到输入（右键菜单）—— 支持 data/blob/http URL */
 export async function addImageFromUrl(src: string): Promise<void> {
   const res = await fetch(src)
-  const blob = await res.blob()
-  if (!blob.type.startsWith('image/')) throw new Error('不是有效的图片')
-  const dataUrl = await blobToDataUrl(blob)
+  const rawBlob = await res.blob()
+  if (!rawBlob.type.startsWith('image/')) throw new Error('不是有效的图片')
+  const blob = await compressInputImageBlob(rawBlob)
+  if (blob !== rawBlob) useStore.getState().showToast('图片过大，已自动压缩', 'info')
+  const dataUrl = await blobToDataUrl(blob, rawBlob.type || 'image/png')
   const id = await storeImage(dataUrl, 'upload')
   cacheImage(id, dataUrl)
   useStore.getState().addInputImage({ id, dataUrl })

@@ -16,6 +16,7 @@
     "@fal-ai/client": "^1.10.0",
     "@streamdown/math": "^1.0.2",
     "@vercel/kv": "^3.0.0",
+    "browser-image-compression": "^2.0.2",
     "core-js": "^3.49.0",
     "fflate": "^0.8.3",
     "katex": "^0.16.47",
