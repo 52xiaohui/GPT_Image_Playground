@@ -17,8 +17,8 @@ const PRICES = {
 const PRICE_PER_IMAGE_CNY = 0.2
 const FREE_IMAGES = 20
 
-// 临时切换到 ai-wave 中转站（OpenAI 兼容格式）；回滚时改回 https://console.gmicloud.ai/api/v1/ie/requestqueue/apikey/requests/v1
-const GMI_BASE = 'https://www.ai-wave.org/v1'
+// 临时切换到 originraft 中转站（OpenAI 兼容格式）；回滚时改回 https://console.gmicloud.ai/api/v1/ie/requestqueue/apikey/requests/v1
+const GMI_BASE = 'https://console-wiregpt.originraft.com/v1'
 const STATS_FILE = join('/tmp', 'gmi-stats.json')
 const STATS_KEY = 'gmi-stats'
 
