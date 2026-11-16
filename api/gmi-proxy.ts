@@ -17,7 +17,7 @@ const PRICES = {
 const PRICE_PER_IMAGE_CNY = 0.2
 const FREE_IMAGES = 20
 
-const GMI_BASE = 'https://console.gmicloud.ai/api/v1/ie/requestqueue/apikey/requests/v1'
+const GMI_BASE = 'https://api.mhenwa.cc/v1'
 const STATS_FILE = join('/tmp', 'gmi-stats.json')
 const STATS_KEY = 'gmi-stats'
 
