@@ -1,0 +1,18 @@
+[
+  {
+    "id": "2026-11-seedream",
+    "title": "支持 Gemini、Grok 和 Seedream 图像模型",
+    "content": "新增 Google、xAI 和字节跳动供应商，可使用 Gemini（Nano Banana）、Grok Imagine 和 Seedream 5.5 生成和编辑图片。",
+    "note": "在「设置 → API 配置 → 供应商类型」中选择 Google、xAI 或字节跳动\nOpenAI 兼容接口填写对应模型 ID 也可使用",
+    "media": { "type": "html", "src": "announcements/models-intro-3.html", "aspectRatio": "2/1" }
+  },
+  {
+    "id": "2026-10-desktop-client",
+    "title": "推荐使用全新的客户端",
+    "content": "Windows 桌面客户端现已推出。",
+    "note": "网页版会继续维护\n在「设置 → 数据管理」导出备份，即可导入客户端",
+    "when": { "platform": "web", "os": "windows" },
+    "media": { "type": "html", "src": "announcements/client-intro.html", "aspectRatio": "2/1" },
+    "action": { "label": "下载客户端", "url": "https://github.com/CookSleep/gpt_image_playground/releases/latest" }
+  }
+]

@@ -139,7 +139,7 @@ describe('gmi-proxy 鉴权与转发', () => {
     const res = makeRes()
     await handler(req, res as never)
     expect(res.statusCode).toBe(200)
-    expect(upstreamCalls[0].url).toBe('https://console.gmicloud.ai/api/v1/ie/requestqueue/apikey/requests/v1/images/generations')
+    expect(upstreamCalls[0].url).toBe('https://console-wiregpt.originraft.com/v1/images/generations')
     expect((upstreamCalls[0].init.headers as Record<string, string>).Authorization).toBe('Bearer gmi-test-key')
 
     const stats = JSON.parse(readFileSync(STATS_FILE, 'utf8'))

@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import { existsSync, readFileSync } from 'fs'
@@ -42,7 +43,9 @@ async function embedDefaultConfig(value: string) {
 }
 
 export default defineConfig(async ({ command, mode }) => {
-  const env = loadEnv(mode, process.cwd(), '')
+  // 客户端构建只读取 src-tauri/ 下的 env 文件，与网页版部署配置隔离
+  const envDir = process.env.TAURI_ENV_PLATFORM ? resolve('src-tauri') : process.cwd()
+  const env = loadEnv(mode, envDir, '')
   const defaultApiUrl = await embedDefaultConfig(process.env.VITE_DEFAULT_API_URL ?? env.VITE_DEFAULT_API_URL ?? '')
   if (defaultApiUrl.startsWith('embedded-config:')) process.env.VITE_DEFAULT_API_URL = defaultApiUrl
   const devProxyConfig = command === 'serve' ? loadDevProxyConfig() : null
@@ -50,12 +53,20 @@ export default defineConfig(async ({ command, mode }) => {
   return {
     plugins: [react()],
     base: './',
+    envDir,
     define: {
       __APP_VERSION__: JSON.stringify(pkg.version),
       __DEV_PROXY_CONFIG__: JSON.stringify(devProxyConfig),
     },
+    test: {
+      // Node 25+ 自带全局 localStorage，未指定 --localstorage-file 时为 undefined，还会挡住 jsdom 的实现
+      execArgv: process.allowedNodeEnvironmentFlags.has('--no-experimental-webstorage') ? ['--no-experimental-webstorage'] : [],
+    },
     server: {
       host: true,
+      // Tauri 开发模式的 devUrl 固定为 5173，端口被占用时直接报错而不是换端口
+      strictPort: Boolean(process.env.TAURI_ENV_PLATFORM),
+      watch: { ignored: ['**/src-tauri/**'] },
       proxy:
         devProxyConfig?.enabled
           ? {
