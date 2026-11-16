@@ -2,7 +2,7 @@
   "customProviders": [
     {
       "id": "gmi",
-      "name": "GMI（gpt-image-2.5）",
+      "name": "GMI（gpt-image-2.5-sunburst）",
       "submit": {
         "path": "images/generations",
         "method": "POST",
@@ -52,10 +52,10 @@
   "profiles": [
     {
       "id": "preset-gmi",
-      "name": "GMI gpt-image-2.5",
+      "name": "GMI gpt-image-2.5-sunburst",
       "provider": "gmi",
       "baseUrl": "https://i.outm.cn/api/gmi-proxy/v1/",
-      "model": "gpt-image-2.5",
+      "model": "gpt-image-2.5-sunburst",
       "apiMode": "images",
       "isDefault": true
     }

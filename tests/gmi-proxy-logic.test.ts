@@ -135,7 +135,7 @@ describe('gmi-proxy 鉴权与转发', () => {
   })
 
   it('正确密码转发到 GMI 并带上真实 Key，/tmp 模式计数 2 张', async () => {
-    const req = { method: 'POST', headers: { authorization: 'Bearer alice:pass1' }, query: { path: 'images/generations' }, body: { model: 'gpt-image-2.5', prompt: 'fox', n: 1 } } as unknown as import('@vercel/node').VercelRequest
+    const req = { method: 'POST', headers: { authorization: 'Bearer alice:pass1' }, query: { path: 'images/generations' }, body: { model: 'gpt-image-2.5-sunburst', prompt: 'fox', n: 1 } } as unknown as import('@vercel/node').VercelRequest
     const res = makeRes()
     await handler(req, res as never)
     expect(res.statusCode).toBe(200)
